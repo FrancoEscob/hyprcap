@@ -6,8 +6,15 @@ description = "Native frontend for wf-recorder on Hyprland / wlroots"
 license = "MIT"
 publish = false
 
+[lib]
+name = "record_ui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "record-ui"
 path = "src/main.rs"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
