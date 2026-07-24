@@ -450,19 +450,20 @@ fn build_window(
     // Shared with click handlers for epoch assignment (also in ViewState).
     let start_epoch_counter = Rc::new(AtomicU64::new(1));
 
+    // Compact control surface — Hyprland also floats+sizes via window rule.
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("record-ui")
-        .default_width(340)
-        .default_height(300)
+        .default_width(300)
+        .default_height(250)
         .resizable(true)
         .build();
 
-    let root = GtkBox::new(Orientation::Vertical, 10);
-    root.set_margin_top(14);
-    root.set_margin_bottom(14);
-    root.set_margin_start(16);
-    root.set_margin_end(16);
+    let root = GtkBox::new(Orientation::Vertical, 6);
+    root.set_margin_top(10);
+    root.set_margin_bottom(10);
+    root.set_margin_start(12);
+    root.set_margin_end(12);
 
     let mode_row = GtkBox::new(Orientation::Horizontal, 8);
     let region_btn = ToggleButton::with_label("Region");
