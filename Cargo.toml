@@ -1,0 +1,13 @@
+[package]
+name = "record-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Native frontend for wf-recorder on Hyprland / wlroots"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "record-ui"
+path = "src/main.rs"
+
+[dependencies]
