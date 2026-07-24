@@ -18,7 +18,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Open / raise the GUI (slice 04 — stub for now).
+    /// Open / raise the GUI view (does not stop recording on close).
     Gui,
     /// Start region recording.
     Region {
@@ -89,14 +89,8 @@ fn ensure_and_request(req: &IpcRequest) -> Result<IpcResponse, String> {
 fn dispatch(cmd: Command) -> Result<i32, String> {
     match cmd {
         Command::Gui => {
-            // Slice 04: real Adwaita window. Stub must not init GTK.
-            let paths = runtime_paths()?;
-            let _ = server::ensure_and_request(&paths, &IpcRequest::ping())?;
-            println!(
-                "record-ui: GUI is not implemented yet (slice 04). Session server is running."
-            );
-            println!("socket: {}", paths.socket_path.display());
-            Ok(0)
+            // GTK/Adwaita init happens only inside `ui::run_gui` — never here for other cmds.
+            Ok(crate::ui::run_gui())
         }
         Command::Region { audio } => {
             let audio = if audio { Some(true) } else { None };

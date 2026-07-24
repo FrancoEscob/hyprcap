@@ -1,7 +1,7 @@
 //! record-ui library: ports, config, Recorder, IPC server/client.
 //!
-//! The binary (`main.rs`) wires CLI over these modules. GTK/adw lives only on
-//! the future `gui` path (slice 04) and is not initialized from library code.
+//! The binary (`main.rs`) wires CLI and the optional GUI view. GTK/adw live only
+//! in the binary `ui` module and are never initialized from library code.
 
 pub mod client;
 pub mod config;

@@ -21,3 +21,6 @@ thiserror = "2"
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
+# GUI path only (`record-ui gui`); CLI paths never call adw/gtk init.
+gtk4 = "0.9"
+libadwaita = "0.7"

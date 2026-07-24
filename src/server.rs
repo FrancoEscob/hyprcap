@@ -112,8 +112,10 @@ where
     Cl: Clipboard,
 {
     recorder: Recorder<S, C, N, Cl>,
-    /// Number of connected GUI views (slice 04); CLI does not count.
+    /// Number of connected GUI views; CLI does not count.
     gui_clients: u32,
+    /// Long-lived GUI subscribe sockets (held until peer disconnect).
+    gui_views: Vec<UnixStream>,
     /// Set by shutdown / quit.
     shutdown: bool,
     /// At least one real IPC request was handled (idle-exit gate).
@@ -136,6 +138,8 @@ enum ConnAction {
     Done { want_shutdown: bool },
     /// Region selection in progress; stream parked in `pending_region`.
     Deferred,
+    /// GUI subscribe: stream parked in `gui_views` until peer disconnects.
+    HoldGui,
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +441,7 @@ where
     let mut state = SessionState {
         recorder,
         gui_clients: 0,
+        gui_views: Vec::new(),
         shutdown: false,
         ever_served: false,
         pending_region: None,
@@ -447,6 +452,8 @@ where
     loop {
         // Drive async region progress + unexpected child exit.
         poll_and_complete_pending(&mut state);
+        // Drop GUI views whose clients disconnected (keeps gui_clients accurate).
+        reap_disconnected_gui_views(&mut state);
 
         if state.shutdown {
             break;
@@ -463,6 +470,7 @@ where
                 if let Err(e) = handle_connection(stream, &mut state) {
                     eprintln!("record-ui server: connection error: {e}");
                 }
+                reap_disconnected_gui_views(&mut state);
                 if state.shutdown {
                     break;
                 }
@@ -486,12 +494,30 @@ where
     if state.recorder.state().is_busy() {
         let _ = state.recorder.stop();
     }
-    // Drop pending client without response if we are shutting down hard.
+    // Drop pending / GUI clients without response if we are shutting down hard.
     state.pending_region = None;
+    state.gui_views.clear();
+    state.gui_clients = 0;
 
     cleanup_runtime_files(&paths);
     drop(_lock);
     Ok(())
+}
+
+/// Reap GUI subscribe sockets that disconnected; decrement `gui_clients`.
+fn reap_disconnected_gui_views<S, C, N, Cl>(state: &mut SessionState<S, C, N, Cl>)
+where
+    S: CommandSpawner,
+    C: Clock,
+    N: Notifier,
+    Cl: Clipboard,
+{
+    let before = state.gui_views.len();
+    state.gui_views.retain(|s| !peer_closed(s));
+    let dropped = before.saturating_sub(state.gui_views.len());
+    if dropped > 0 {
+        state.gui_clients = state.gui_clients.saturating_sub(dropped as u32);
+    }
 }
 
 fn should_idle_exit<S, C, N, Cl>(idle_exit: bool, state: &SessionState<S, C, N, Cl>) -> bool
@@ -675,6 +701,12 @@ where
                 poll_and_complete_pending(state);
                 return Ok(());
             }
+            ConnAction::HoldGui => {
+                // Transfer count ownership to parked list (do not decrement on return).
+                state.gui_views.push(writer);
+                *gui_counted = false;
+                return Ok(());
+            }
         }
     }
 
@@ -755,12 +787,18 @@ where
                 want_shutdown: o.want_shutdown,
             })
         }
-        IpcCommand::Status | IpcCommand::Subscribe => {
+        IpcCommand::Status => {
             let o = handle_request(&mut state.recorder, req, state.gui_clients);
             write_response(writer, &o.response)?;
             Ok(ConnAction::Done {
                 want_shutdown: o.want_shutdown,
             })
+        }
+        IpcCommand::Subscribe => {
+            let o = handle_request(&mut state.recorder, req, state.gui_clients);
+            write_response(writer, &o.response)?;
+            // Keep the connection open so gui_clients stays elevated until disconnect.
+            Ok(ConnAction::HoldGui)
         }
         IpcCommand::Shutdown => {
             let (result, want) = shutdown_result(&mut state.recorder);
@@ -1481,6 +1519,221 @@ mod tests {
         }
         assert!(h.is_finished(), "server should exit after idle status");
         let _ = h.join();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// GUI subscribe hold: idle server stays up while view connected; drops on disconnect.
+    #[test]
+    fn subscribe_hold_blocks_idle_exit_until_disconnect() {
+        let root = temp_runtime();
+        let videos = root.join("Videos");
+        fs::create_dir_all(&videos).unwrap();
+        let paths = RuntimePaths::from_runtime_dir(root.join("run"));
+        fs::create_dir_all(&paths.runtime_dir).unwrap();
+
+        let rec = make_recorder(&videos, FakeSpawner::new());
+        let h = start_test_server(paths.clone(), rec, true);
+        wait_sock(&paths);
+
+        // Round-trip IpcRequest::subscribe encode/decode + live hold.
+        let sub_req = IpcRequest::subscribe();
+        assert_eq!(sub_req.cmd, IpcCommand::Subscribe);
+        assert_eq!(sub_req.gui, Some(true));
+        let line = crate::ipc::encode_request(&sub_req).unwrap();
+        let back = crate::ipc::decode_request(&line).unwrap();
+        assert_eq!(back.cmd, IpcCommand::Subscribe);
+        assert_eq!(back.gui, Some(true));
+
+        let (hold, sub) = client::subscribe(&paths.socket_path).expect("subscribe");
+        assert!(sub.ok, "{sub:?}");
+        assert_eq!(sub.message, "subscribed");
+        assert_eq!(sub.code, "ok");
+
+        // Status while GUI held — server must not idle-exit.
+        let st = client::request(&paths.socket_path, &IpcRequest::status()).unwrap();
+        assert_eq!(st.status.state, "Idle");
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(
+            !h.is_finished(),
+            "server must stay up while GUI subscribe is held"
+        );
+        assert!(UnixStream::connect(&paths.socket_path).is_ok());
+
+        // Disconnect view → idle-exit allowed.
+        drop(hold);
+        for _ in 0..80 {
+            if h.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            h.is_finished(),
+            "server should idle-exit after GUI disconnect"
+        );
+        let _ = h.join();
+        // Socket gone after clean idle-exit.
+        assert!(
+            UnixStream::connect(&paths.socket_path).is_err(),
+            "connect should fail after server idle-exit"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// GUI disconnect mid-recording: recording continues; stop still works.
+    #[test]
+    fn gui_disconnect_mid_recording_keeps_session() {
+        let root = temp_runtime();
+        let videos = root.join("Videos");
+        fs::create_dir_all(&videos).unwrap();
+        let paths = RuntimePaths::from_runtime_dir(root.join("run"));
+        fs::create_dir_all(&paths.runtime_dir).unwrap();
+
+        let mut spawner = FakeSpawner::new();
+        spawner.push(slurp_ok("0,0 100x100"));
+        let rec = make_recorder(&videos, spawner);
+        let h = start_test_server(paths.clone(), rec, false);
+        wait_sock(&paths);
+
+        let (hold, sub) = client::subscribe(&paths.socket_path).expect("subscribe");
+        assert!(sub.ok, "{sub:?}");
+
+        let start = client::request(&paths.socket_path, &IpcRequest::start_region(None)).unwrap();
+        assert!(start.ok, "{start:?}");
+        assert_eq!(start.status.state, "Recording");
+
+        // Close GUI view only.
+        drop(hold);
+        std::thread::sleep(Duration::from_millis(80));
+
+        let st = client::request(&paths.socket_path, &IpcRequest::status()).unwrap();
+        assert_eq!(
+            st.status.state, "Recording",
+            "recording must continue after GUI close"
+        );
+
+        let stop = client::request(&paths.socket_path, &IpcRequest::stop()).unwrap();
+        assert!(stop.ok, "{stop:?}");
+        assert_eq!(stop.status.state, "Idle");
+
+        let _ = client::request(&paths.socket_path, &IpcRequest::shutdown());
+        let _ = h.join();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Dual subscribe: both count; both must disconnect before idle-exit.
+    #[test]
+    fn dual_subscribe_reap_both_before_idle_exit() {
+        let root = temp_runtime();
+        let videos = root.join("Videos");
+        fs::create_dir_all(&videos).unwrap();
+        let paths = RuntimePaths::from_runtime_dir(root.join("run"));
+        fs::create_dir_all(&paths.runtime_dir).unwrap();
+
+        let rec = make_recorder(&videos, FakeSpawner::new());
+        let h = start_test_server(paths.clone(), rec, true);
+        wait_sock(&paths);
+
+        let (hold1, s1) = client::subscribe(&paths.socket_path).expect("sub1");
+        let (hold2, s2) = client::subscribe(&paths.socket_path).expect("sub2");
+        assert!(s1.ok && s2.ok);
+
+        let _ = client::request(&paths.socket_path, &IpcRequest::status()).unwrap();
+        drop(hold1);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !h.is_finished(),
+            "one remaining GUI view must block idle-exit"
+        );
+
+        drop(hold2);
+        for _ in 0..80 {
+            if h.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(h.is_finished(), "idle-exit after both GUI views disconnect");
+        let _ = h.join();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// CLI start/stop while GUI subscribe is held.
+    #[test]
+    fn cli_start_stop_under_gui_hold() {
+        let root = temp_runtime();
+        let videos = root.join("Videos");
+        fs::create_dir_all(&videos).unwrap();
+        let paths = RuntimePaths::from_runtime_dir(root.join("run"));
+        fs::create_dir_all(&paths.runtime_dir).unwrap();
+
+        let mut spawner = FakeSpawner::new();
+        spawner.push(slurp_ok("1,1 2x2"));
+        let rec = make_recorder(&videos, spawner);
+        let h = start_test_server(paths.clone(), rec, false);
+        wait_sock(&paths);
+
+        let (hold, _) = client::subscribe(&paths.socket_path).expect("subscribe");
+
+        let start = client::request(&paths.socket_path, &IpcRequest::start_region(None)).unwrap();
+        assert!(start.ok, "{start:?}");
+        assert_eq!(start.status.state, "Recording");
+
+        let stop = client::request(&paths.socket_path, &IpcRequest::stop()).unwrap();
+        assert!(stop.ok, "{stop:?}");
+        assert_eq!(stop.status.state, "Idle");
+
+        drop(hold);
+        let _ = client::request(&paths.socket_path, &IpcRequest::shutdown());
+        let _ = h.join();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// notify_start suppressed when gui_clients > 0 (via handle_request path).
+    #[test]
+    fn notify_start_suppressed_when_gui_clients_nonzero() {
+        let root = temp_runtime();
+        let videos = root.join("Videos");
+        fs::create_dir_all(&videos).unwrap();
+
+        #[derive(Default)]
+        struct CountingNotifier {
+            calls: Vec<(String, String)>,
+        }
+        impl Notifier for CountingNotifier {
+            fn notify(&mut self, title: &str, body: &str) -> Result<(), PortError> {
+                self.calls.push((title.into(), body.into()));
+                Ok(())
+            }
+        }
+
+        let mut spawner = FakeSpawner::new();
+        spawner.push(slurp_ok("0,0 10x10"));
+        let mut cfg = test_config(&videos);
+        cfg.notify = true;
+        cfg.notify_on_start_cli = true;
+        let mut rec = Recorder::new(
+            spawner,
+            FakeClock::at_secs(1_705_322_245),
+            CountingNotifier::default(),
+            FakeClipboard,
+            cfg,
+        );
+
+        // gui_clients = 1 → notify_start false inside handle_request.
+        let out = handle_request(&mut rec, &IpcRequest::start_region(None), 1);
+        assert!(out.response.ok, "{:?}", out.response);
+        assert_eq!(out.response.status.state, "Recording");
+        assert!(
+            !rec.notifier()
+                .calls
+                .iter()
+                .any(|(_, b)| b.contains("Recording started")),
+            "start toast must be suppressed when GUI clients attached: {:?}",
+            rec.notifier().calls
+        );
+
+        let _ = rec.stop();
         let _ = fs::remove_dir_all(&root);
     }
 

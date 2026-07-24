@@ -58,3 +58,38 @@ pub fn request_in_runtime(
 ) -> Result<IpcResponse, ClientError> {
     request(&runtime_dir.join(crate::server::SOCKET_NAME), req)
 }
+
+/// Open a long-lived GUI subscribe connection.
+///
+/// The returned stream **must be kept open** for the lifetime of the GUI view so
+/// the server keeps `gui_clients` elevated (idle-exit / notify-on-start policy).
+/// Dropping the stream disconnects the view only — it does **not** stop recording.
+pub fn subscribe(socket_path: &Path) -> Result<(UnixStream, IpcResponse), ClientError> {
+    let mut stream = UnixStream::connect(socket_path).map_err(ClientError::Connect)?;
+    // No short read timeout: we hold the connection open; server does not push.
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+
+    let req = IpcRequest::subscribe();
+    let line = encode_request(&req).map_err(|e| ClientError::Protocol(e.to_string()))?;
+    if line.len() > MAX_LINE_BYTES {
+        return Err(ClientError::Protocol("request too large".into()));
+    }
+    stream.write_all(line.as_bytes())?;
+    stream.flush()?;
+
+    // Read one response line, leave the socket open for the server hold.
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut buf = Vec::new();
+    let mut take = reader.by_ref().take(MAX_LINE_BYTES as u64 + 1);
+    let n = take.read_until(b'\n', &mut buf)?;
+    if n == 0 {
+        return Err(ClientError::Protocol("empty response from server".into()));
+    }
+    if buf.len() > MAX_LINE_BYTES {
+        return Err(ClientError::Protocol("response line too large".into()));
+    }
+    let resp_line = String::from_utf8_lossy(&buf);
+    let resp = decode_response(&resp_line).map_err(|e| ClientError::Protocol(e.to_string()))?;
+    Ok((stream, resp))
+}

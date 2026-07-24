@@ -30,7 +30,8 @@ pub struct IpcRequest {
     /// Optional audio override for start / toggle-region.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<bool>,
-    /// GUI clients may set this when attaching (subscribe); reserved for slice 04.
+    /// When true (typically with `Subscribe`), the server counts this connection
+    /// as a GUI view until disconnect (idle-exit / notify-on-start policy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gui: Option<bool>,
 }
@@ -89,6 +90,15 @@ impl IpcRequest {
             cmd: IpcCommand::Shutdown,
             audio: None,
             gui: None,
+        }
+    }
+
+    /// GUI attach: server counts this connection until disconnect.
+    pub fn subscribe() -> Self {
+        Self {
+            cmd: IpcCommand::Subscribe,
+            audio: None,
+            gui: Some(true),
         }
     }
 }
