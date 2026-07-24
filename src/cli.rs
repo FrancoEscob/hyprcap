@@ -28,11 +28,13 @@ pub enum Command {
     },
     /// Start fullscreen recording (no region).
     Fullscreen {
+        /// Enable system audio (`wf-recorder -a`).
         #[arg(long)]
         audio: bool,
     },
     /// Toggle region: Idle→start, SelectingRegion→cancel, Recording→stop.
     ToggleRegion {
+        /// Enable system audio (`wf-recorder -a`) when starting.
         #[arg(long)]
         audio: bool,
     },

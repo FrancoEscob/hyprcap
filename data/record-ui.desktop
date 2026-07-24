@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=record-ui
+GenericName=Screen Recorder
+Comment=Region/fullscreen screen recorder for Hyprland (wf-recorder frontend)
+Exec=record-ui gui
+Icon=media-record
+Terminal=false
+Categories=AudioVideo;Video;Recorder;
+Keywords=record;screen;wf-recorder;hyprland;wayland;region;
+StartupNotify=true
+StartupWMClass=dev.recordui.app
