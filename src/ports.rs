@@ -14,6 +14,9 @@ use std::time::{Duration, SystemTime};
 /// Soft cap for retained child stderr (SPEC ~4KiB).
 pub const STDERR_TAIL_MAX: usize = 4096;
 
+/// Soft cap for child stdout capture (slurp geometry); oversize is discarded.
+pub const STDOUT_CAPTURE_MAX: usize = 4096;
+
 /// Unix-style signals used for cooperative stop of `wf-recorder` process groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Signal {
@@ -178,11 +181,19 @@ pub fn default_config_path(xdg_config_home: Option<&Path>, home: &Path) -> PathB
     base.join("record-ui").join("config.toml")
 }
 
-/// Runtime dir for socket/pid: `$XDG_RUNTIME_DIR` or `/tmp`.
+/// Runtime dir for socket/pid.
+///
+/// Prefers `$XDG_RUNTIME_DIR`, then `/run/user/$UID`.
+/// **Never** falls back to `/tmp` or predictable `/tmp/record-ui-$UID` (multi-user risk).
+/// Callers must validate ownership/mode via [`crate::server`] acquire path before binding.
 pub fn default_runtime_dir(xdg_runtime_dir: Option<&Path>) -> PathBuf {
-    xdg_runtime_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+    if let Some(p) = xdg_runtime_dir {
+        if !p.as_os_str().is_empty() {
+            return p.to_path_buf();
+        }
+    }
+    let uid = unsafe { libc::getuid() };
+    PathBuf::from(format!("/run/user/{uid}"))
 }
 
 /// Make `path` absolute using `cwd` when relative (SPEC: absolute paths in hooks).
