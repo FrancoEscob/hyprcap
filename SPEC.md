@@ -1,4 +1,4 @@
-# record-ui — Spec v1
+# Hyprcap (formerly record-ui) — Spec v1
 
 **Status:** `ready-for-agent` (post adversarial product + architecture review)  
 **Previous:** draft v0  

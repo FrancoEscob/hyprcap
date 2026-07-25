@@ -1,4 +1,4 @@
-# record-ui — Multi-monitor capture SPEC
+# Hyprcap — Multi-monitor capture SPEC
 
 **Status:** `shipped` (P0 One pickers + P1 Both dual session / GUI Both; product decisions closed 2026-07-25)  
 **Parent:** `SPEC.md` v1 (daemon-on-demand, exclusive session, cooperative stop)  
