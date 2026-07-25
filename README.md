@@ -10,6 +10,15 @@ Small **pure Rust** screen recorder for **Hyprland** — a GTK4 / libadwaita UI 
 
 CLI for keybinds. Files land in Videos; path is copied to the clipboard.
 
+> **Initial release (v0.1).** Solid for daily recording on Hyprland, but early days — more is coming. Feedback and issues welcome.
+
+**Planned / next ideas** (not a promise of order):
+
+- Easier **keybind** setup (docs + helpers; maybe config-driven presets)
+- More **quality / codec** options (`wf-recorder` / ffmpeg knobs without leaving the app)
+- Polish for **2 monitors** (3+ still out of scope for now)
+- Small UX extras as people use it
+
 <p align="center">
   <img src="docs/screenshots/region.png" alt="record-ui — Region mode" width="320" />
   &nbsp;
