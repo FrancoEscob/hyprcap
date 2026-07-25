@@ -1021,6 +1021,8 @@ fn build_window(
     }
 
     // --- Smooth timer: started_at_unix + wall clock ---
+    // Freeze while stop_in_flight / Stopping (Both compose can take seconds while
+    // last_status is still "Recording" because stop blocks the accept loop).
     {
         let view = Rc::clone(&view);
         let timer_label = timer_label.clone();
@@ -1031,7 +1033,7 @@ fn build_window(
             }
             let v = view.borrow();
             if let Some(ref st) = v.last_status {
-                if st.state == "Recording" {
+                if timer_should_tick(&st.state, v.stop_in_flight) {
                     timer_label.set_text(&format_elapsed(st));
                 }
             }
@@ -1393,14 +1395,16 @@ fn apply_status(
 
     w.state_label.set_text(&format!("State: {}", status.state));
 
+    let stop_in_flight = view.borrow().stop_in_flight;
     match status.state.as_str() {
-        "Recording" => {
+        "Recording" if timer_should_tick("Recording", stop_in_flight) => {
             w.timer_label.set_text(&format_elapsed(&status));
         }
         "Idle" | "SelectingRegion" => {
             w.timer_label.set_text("00:00");
         }
-        "Starting" | "Stopping" => {}
+        // Freeze display during stop / compose (and while stop RPC is in flight).
+        "Starting" | "Stopping" | "Recording" => {}
         _ => {}
     }
 
@@ -1477,6 +1481,12 @@ fn refresh_primary_from_view(view: &Rc<RefCell<ViewState>>, primary: &Button) {
         primary.add_css_class("suggested-action");
         primary.set_sensitive(!start_in_flight && !stop_in_flight);
     }
+}
+
+/// Whether the smooth timer may advance. Frozen during stop/compose so Both
+/// stitch time is not counted as recording.
+fn timer_should_tick(state: &str, stop_in_flight: bool) -> bool {
+    state == "Recording" && !stop_in_flight
 }
 
 /// Smooth elapsed: prefer `started_at_unix` + wall clock so ticks advance between polls.
@@ -2038,6 +2048,16 @@ mod picker_tests {
             assert_eq!(g.enabled(), want_en, "enabled n={n} ff={ff}: got {:?}", g);
             assert_eq!(g.tooltip(), want_tip, "tooltip n={n} ff={ff}");
         }
+    }
+
+    #[test]
+    fn timer_freezes_while_stop_in_flight_or_not_recording() {
+        assert!(timer_should_tick("Recording", false));
+        assert!(!timer_should_tick("Recording", true));
+        assert!(!timer_should_tick("Stopping", false));
+        assert!(!timer_should_tick("Stopping", true));
+        assert!(!timer_should_tick("Idle", false));
+        assert!(!timer_should_tick("Starting", false));
     }
 
     #[test]
