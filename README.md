@@ -2,8 +2,8 @@
 
 Native frontend for [`wf-recorder`](https://github.com/ammen99/wf-recorder) on **Hyprland / wlroots**.
 
-- **Daemon-on-demand** session server owns an exclusive recording session (one `wf-recorder` child today)
-- **CLI** for keybinds (`toggle-region`, `stop`, `status`, …) — never initializes GTK
+- **Daemon-on-demand** session server owns an exclusive recording session (region/one = one `wf-recorder` child; **Both** = two children + post-stop `ffmpeg` layout-true stitch)
+- **CLI** for keybinds (`toggle-region`, `stop`, `status`, `both`, …) — never initializes GTK
 - **Optional GTK4 + libadwaita** GUI as a view on the same session
 - Clipboard gets the **absolute file path** (text), not video bytes
 
@@ -21,6 +21,7 @@ Hard (required to record):
 |--------|----------|
 | `wf-recorder` | Capture / encode |
 | `slurp` | Region selection |
+| `ffmpeg` | **Both** compose only (layout-true stitch after stop); not required for region/one |
 
 Soft (features degrade if missing):
 
@@ -29,6 +30,7 @@ Soft (features degrade if missing):
 | `notify-send` | Desktop notifications (`libnotify`) |
 | `wl-copy` | Copy output path (`wl-clipboard`) |
 | `xdg-open` | Open last file / folder from GUI |
+| `hyprctl` | Rich output inventory / layout positions (hard for **Both** start; soft fallback names-only for One) |
 
 Build-time (for GUI path): `gtk4`, `libadwaita`, `pkg-config` / `pkgconf`, and a C toolchain (`base-devel` or equivalent).
 
@@ -66,7 +68,8 @@ Default with no subcommand is the same as `gui`.
 |---------|----------|
 | `record-ui` / `record-ui gui` | Ensure server; open/raise GUI client |
 | `record-ui region [--audio]` | Start region recording (error if busy) |
-| `record-ui fullscreen [--audio] [--output NAME]` | Start one-monitor capture (`wf-recorder -o`; error if busy / unresolved) |
+| `record-ui fullscreen [--audio] [--output NAME] [--fps N]` | Start one-monitor capture (`wf-recorder -o`; error if busy / unresolved) |
+| `record-ui both [--audio]` | Start both-monitors capture (exactly 2 heads + hyprctl positions + ffmpeg; dual `wf-recorder` @ 60 fps; layout-true stitch on stop) |
 | `record-ui list-outputs` | Print inventory: `name\tx\ty\tw\th\trefresh` when geometry known (hyprctl); name-only fallback (`wf-recorder -L`). No daemon. |
 | `record-ui toggle-region [--audio]` | Idle→region start; SelectingRegion→cancel slurp; Recording→stop; Stopping→idempotent wait/no-op |
 | `record-ui stop` | Stop if recording/selecting; no-op success if idle |
@@ -82,18 +85,20 @@ Default with no subcommand is the same as `gui`.
 | 0 | Success / idle no-op stop / slurp cancel treated as clean abort for toggle |
 | 1 | General failure (spawn, I/O, …) |
 | 2 | Busy (`AlreadyBusy`) |
-| 4 | Hard dependency missing (`wf-recorder` / `slurp`) |
+| 4 | Hard dependency missing (`wf-recorder` / `slurp` / `ffmpeg` for Both) |
 
 ### `status` JSON (high level)
 
-Fields include: `state`, `output_path`, `pid`, `started_at_unix`, `audio`, `last_error`, `last_success_path`, `elapsed_ms`, `capture_output` (active one-monitor head when set).
+Fields include: `state`, `output_path`, `pid`, `started_at_unix`, `audio`, `last_error`, `last_success_path`, `elapsed_ms`, `capture_output` (active one-monitor head or Both label e.g. `HDMI-A-1+DP-1`), `capture_mode` (`region` / `one` / `both` while active). When `capture_mode` is `both`, **`pid` is the primary recorder only** (not the sole OS child).
 
 ### Process model (short)
 
 1. First command that needs a session starts a **server** binding `$XDG_RUNTIME_DIR/record-ui.sock` (mode `0600`) and writing `$XDG_RUNTIME_DIR/record-ui.pid`.
 2. Later invocations are **clients** over that socket.
 3. Closing the GUI only disconnects the view — **recording continues** until `stop`, toggle-stop, or `quit`.
-4. Exclusive **session**: one managed recording session (one `wf-recorder` child today); external instances are ignored.
+4. Exclusive **session**: at most one managed recording session. **Region / One** = one `wf-recorder` child; **Both** = two `wf-recorder` process groups + blocking post-stop `ffmpeg` stitch into one final file. External capture tools are ignored.
+5. **`stop` / `quit`** are cooperative finalize: for Both they reap both children and **run the stitch** before the RPC returns (may take a while; the accept loop is blocked mid-compose). Only process **Drop** / panic unclean paths skip stitch and prefer retaining temps.
+6. Both stop is product choice A: no async “composing…” progress channel in this release.
 
 Socket path: **`$XDG_RUNTIME_DIR/record-ui.sock`**.
 
@@ -140,6 +145,8 @@ notify = true
 |--------|-------|------------------|
 | `wf-recorder` | Hard | Fail start; CLI exit **4**; clear message |
 | `slurp` | Hard for region | Fail region start; exit **4** |
+| `ffmpeg` | Hard for **Both** only | Fail Both start; exit **4**; region/one unaffected |
+| `hyprctl` | Soft inventory / hard Both positions | Names-only fallback for One; Both start fails without geometry |
 | `notify-send` | Soft | Degrade; warn once |
 | `wl-copy` | Soft | Degrade; warn once |
 | `xdg-open` | Soft (GUI open actions) | Fail only that action |

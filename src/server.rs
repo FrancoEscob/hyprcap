@@ -349,6 +349,7 @@ where
             recorder.start_fullscreen(req.audio, notify_start, req.output.as_deref(), req.fps),
             false,
         ),
+        IpcCommand::StartBoth => (recorder.start_both(req.audio, notify_start), false),
         IpcCommand::Stop => (recorder.stop(), false),
         IpcCommand::ToggleRegion => (recorder.toggle_region(req.audio, notify_start), false),
         IpcCommand::Shutdown => shutdown_result(recorder),
@@ -373,6 +374,8 @@ where
     N: Notifier,
     Cl: Clipboard,
 {
+    // Cooperative finalize: stop() for Both may block on layout-true ffmpeg stitch.
+    // Unclean Drop skips stitch; IPC quit/stop intentionally stitches when possible.
     let stop_result = recorder.stop();
     // Preserve stop failure (e.g. stop_timeout) on the response while still exiting.
     if stop_result.code == MachineCode::Ok || stop_result.code == MachineCode::SlurpCancel {
@@ -782,6 +785,15 @@ where
                 req.output.as_deref(),
                 req.fps,
             );
+            let o = outcome_from_result(result, &state.recorder);
+            write_response(writer, &o.response)?;
+            Ok(ConnAction::Done {
+                want_shutdown: false,
+            })
+        }
+        IpcCommand::StartBoth => {
+            // Blocking stop later covers stitch; start itself is dual-spawn only.
+            let result = state.recorder.start_both(req.audio, notify_start);
             let o = outcome_from_result(result, &state.recorder);
             write_response(writer, &o.response)?;
             Ok(ConnAction::Done {

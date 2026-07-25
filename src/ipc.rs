@@ -17,6 +17,8 @@ pub enum IpcCommand {
     Status,
     StartRegion,
     StartFullscreen,
+    /// Dual-monitor Both session (layout from live inventory; optional audio only).
+    StartBoth,
     Stop,
     ToggleRegion,
     Shutdown,
@@ -85,6 +87,17 @@ impl IpcRequest {
         }
     }
 
+    /// Start Both: optional `audio` only (layout from live inventory).
+    pub fn start_both(audio: Option<bool>) -> Self {
+        Self {
+            cmd: IpcCommand::StartBoth,
+            audio,
+            gui: None,
+            output: None,
+            fps: None,
+        }
+    }
+
     pub fn stop() -> Self {
         Self {
             cmd: IpcCommand::Stop,
@@ -138,9 +151,12 @@ pub struct IpcStatus {
     pub last_error: Option<String>,
     pub last_success_path: Option<String>,
     pub elapsed_ms: Option<u64>,
-    /// Resolved one-monitor output name while Starting/Recording/Stopping.
+    /// Resolved one-monitor / Both output label while Starting/Recording/Stopping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_output: Option<String>,
+    /// `"region" | "one" | "both"` while Starting/Recording/Stopping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_mode: Option<String>,
 }
 
 impl From<&Status> for IpcStatus {
@@ -158,6 +174,7 @@ impl From<&Status> for IpcStatus {
                 .map(|p| p.display().to_string()),
             elapsed_ms: s.elapsed_ms,
             capture_output: s.capture_output.clone(),
+            capture_mode: s.capture_mode.clone(),
         }
     }
 }
@@ -282,6 +299,20 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_start_both() {
+        let req = IpcRequest::start_both(Some(true));
+        let line = encode_request(&req).unwrap();
+        let back = decode_request(&line).unwrap();
+        assert_eq!(back.cmd, IpcCommand::StartBoth);
+        assert_eq!(back.audio, Some(true));
+        assert!(back.output.is_none());
+        assert!(back.fps.is_none());
+        let bare = decode_request(r#"{"cmd":"start_both"}"#).unwrap();
+        assert_eq!(bare.cmd, IpcCommand::StartBoth);
+        assert_eq!(bare.audio, None);
+    }
+
+    #[test]
     fn response_exit_codes() {
         let st = Status {
             state: crate::recorder::State::Idle,
@@ -293,6 +324,7 @@ mod tests {
             last_success_path: None,
             elapsed_ms: None,
             capture_output: None,
+            capture_mode: None,
         };
         let cases = [
             (MachineCode::Ok, 0),
