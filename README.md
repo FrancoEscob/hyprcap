@@ -114,6 +114,7 @@ Path: **`$XDG_CONFIG_HOME/record-ui/config.toml`**
 | `stop_timeout_ms` | `5000` | Wait after SIGINT before SIGTERM |
 | `stop_term_timeout_ms` | `2000` | Wait after SIGTERM before hard failure |
 | `fullscreen_output` | *(unset)* | Wayland output for one-monitor fullscreen (`-o`). **Required when ≥2 outputs**; sole head auto-resolves when inventory length is 1 |
+| `one_fps` | *(unset)* | One-monitor FPS: **absent** = CLI Auto / GUI first-run **native**; **`0`** = sticky Auto (GUI remember); **`n > 0`** = fixed `-r n` |
 
 Filename pattern: **`rec-YYYYMMDD-HHMMSS.mp4`**. Same-second collisions append `-1`, `-2`, …  
 `output_dir` is created if missing.
@@ -128,6 +129,7 @@ copy_path = true
 notify = true
 # Required on multi-monitor for One monitor / fullscreen (no focus auto-pick):
 # fullscreen_output = "DP-1"
+# one_fps = 144          # fixed rate; use 0 for sticky Auto in GUI
 ```
 
 ---

@@ -98,8 +98,20 @@ Write config:
 
 ```toml
 fullscreen_output = "HDMI-A-1"   # Wayland output name
-one_fps = 144                    # integer; omit or null = Auto (no -r)
+one_fps = 144                    # see three-way meaning below
+# one_fps = 0                    # sticky Auto (GUI remember)
+# # omit one_fps entirely        # CLI Auto; GUI first-run → native
 ```
+
+**`one_fps` three-way meaning:**
+
+| Value | CLI / resolve (`resolve_one_fps`) | GUI picker on load |
+|-------|-----------------------------------|--------------------|
+| absent / `None` | Auto (omit `-r`) | **native** (first-run default) |
+| `0` | Auto (omit `-r`) | **Auto** (sticky remember) |
+| `n > 0` | `-r n` | select rate `n` (include in list if non-standard) |
+
+GUI writes `one_fps = 0` when the user picks Auto so reopen does not re-default to native.
 
 **First launch defaults (no config):**
 
@@ -153,9 +165,15 @@ Argv: if FPS is Auto → omit `-r`. Else `wf-recorder -r <N>`.
 Order suggestion: Auto, Native (label `144 (native)`), 60, 30 — dedupe equal values.
 
 CLI: `record-ui fullscreen [--output NAME] [--fps N] [--audio]`  
-`--fps` omitted = Auto.
+`--fps` omitted → use config `one_fps` if set (`0` still Auto), else Auto.
 
-Config: `one_fps` optional integer; absent = Auto when not overridden by GUI session state.
+Config `one_fps` (same three-way as §5.3):
+
+- **absent / null:** CLI Auto; GUI first-run selects **native**.
+- **`0`:** sticky **Auto** for GUI reopen; resolve treats as Auto (no `-r`).
+- **`n > 0`:** fixed rate for CLI and GUI.
+
+GUI session start always sends explicit IPC `fps` (`0` for Auto, else `n`) so config cannot override that start.
 
 ### 6.3 Argv
 
@@ -278,7 +296,7 @@ When recording Both (and after resolve One):
 output_dir = "..."
 audio_default = false
 fullscreen_output = "HDMI-A-1"   # One monitor pin
-one_fps = 144                    # optional; omit = Auto
+one_fps = 144                    # n > 0 fixed rate; 0 = sticky Auto (GUI); omit = CLI Auto / GUI native first-run
 # both_fps fixed at 60 in this SPEC — no config key required
 ```
 

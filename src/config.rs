@@ -31,8 +31,12 @@ pub struct Config {
     /// Empty/None: sole output if inventory length is 1; else start fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fullscreen_output: Option<String>,
-    /// One-monitor FPS for `wf-recorder -r`. Absent/`None` = Auto (omit `-r`)
-    /// when CLI/IPC does not pass an explicit fps for this start.
+    /// One-monitor FPS for `wf-recorder -r`.
+    ///
+    /// - `None` / absent: Auto for CLI resolve (no `-r`); GUI first-run defaults to **native**.
+    /// - `Some(0)`: remembered **Auto** (GUI sticky; resolve treats 0 as Auto).
+    /// - `Some(n)` with `n > 0`: fixed rate.
+    ///
     /// CLI/IPC `--fps` / `fps` overrides this for a single start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub one_fps: Option<u32>,
@@ -104,9 +108,53 @@ impl Config {
             .filter(|s| !s.is_empty())
     }
 
-    /// Configured one-monitor FPS, if set (Auto when `None`).
+    /// Raw config `one_fps` value (`None` / `Some(0)` / `Some(n > 0)`).
+    ///
+    /// Does not interpret Auto: callers should pass this to [`crate::recorder::resolve_one_fps`],
+    /// which treats both `None` and `0` as Auto (omit `-r`). GUI load maps `None` → native
+    /// first-run and `Some(0)` → sticky Auto (see field docs / DUAL-MONITOR §5.3).
     pub fn one_fps_override(&self) -> Option<u32> {
         self.one_fps
+    }
+
+    /// Write this config as TOML to `path` (creates parent dirs).
+    ///
+    /// Used by the GUI to persist `fullscreen_output` / `one_fps` on picker change
+    /// (DUAL-MONITOR §5.3). Other keys are rewritten from the in-memory snapshot.
+    ///
+    /// Writes via a sibling temp file then `rename` so a crash mid-write cannot
+    /// leave a truncated `config.toml`.
+    pub fn save_to_path(&self, path: &Path) -> Result<(), PortError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                PortError::Io(format!("create config dir {}: {e}", parent.display()))
+            })?;
+        }
+        let text = toml::to_string_pretty(self)
+            .map_err(|e| PortError::Io(format!("serialize config: {e}")))?;
+        // Sibling temp in the same directory so rename is atomic on the same FS.
+        let tmp = {
+            let mut t = path.as_os_str().to_os_string();
+            t.push(".tmp");
+            PathBuf::from(t)
+        };
+        fs::write(&tmp, &text)
+            .map_err(|e| PortError::Io(format!("write config temp {}: {e}", tmp.display())))?;
+        fs::rename(&tmp, path).map_err(|e| {
+            // Best-effort cleanup of the temp on rename failure.
+            let _ = fs::remove_file(&tmp);
+            PortError::Io(format!(
+                "rename config temp {} → {}: {e}",
+                tmp.display(),
+                path.display()
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// Save to Paths port config location.
+    pub fn save(&self, paths: &dyn Paths) -> Result<(), PortError> {
+        self.save_to_path(&paths.config_path())
     }
 
     /// Load TOML from `path`. Missing file → defaults. Partial TOML merges over defaults.
@@ -275,5 +323,102 @@ one_fps = 144
         let cfg = Config::parse_toml("output_dir = \"clips\"\n", defaults).unwrap();
         assert!(cfg.output_dir.is_absolute(), "{:?}", cfg.output_dir);
         assert!(cfg.output_dir.ends_with("clips"));
+    }
+
+    fn temp_cfg_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "record-ui-cfg-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn save_to_path_roundtrip_one_pickers() {
+        let dir = temp_cfg_dir();
+        // Nested path: save must create parent dirs.
+        let path = dir.join("nested").join("record-ui").join("config.toml");
+
+        let mut cfg = Config::with_home(Path::new("/home/test"), None);
+        cfg.audio_default = true;
+        cfg.copy_path = false;
+        cfg.fullscreen_output = Some("HDMI-A-1".into());
+        cfg.one_fps = Some(144);
+        cfg.save_to_path(&path).unwrap();
+        assert!(path.parent().unwrap().is_dir());
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("fullscreen_output"), "{text}");
+        assert!(text.contains("HDMI-A-1"), "{text}");
+        assert!(text.contains("one_fps"), "{text}");
+        assert!(text.contains("144"), "{text}");
+        // No leftover temp after successful rename (path + ".tmp").
+        let tmp = {
+            let mut t = path.as_os_str().to_os_string();
+            t.push(".tmp");
+            PathBuf::from(t)
+        };
+        assert!(!tmp.exists(), "temp file should be renamed away");
+
+        let loaded =
+            Config::load_from_path(&path, Config::with_home(Path::new("/home/test"), None))
+                .unwrap();
+        assert_eq!(loaded.fullscreen_output.as_deref(), Some("HDMI-A-1"));
+        assert_eq!(loaded.one_fps, Some(144));
+        // Non-picker fields survive load→mutate→save.
+        assert!(loaded.audio_default);
+        assert!(!loaded.copy_path);
+
+        // Sticky Auto: one_fps = 0 is written and reloaded.
+        cfg.one_fps = Some(0);
+        cfg.save_to_path(&path).unwrap();
+        let text2 = fs::read_to_string(&path).unwrap();
+        assert!(
+            text2
+                .lines()
+                .any(|l| l.contains("one_fps") && l.contains('0')),
+            "one_fps = 0 should be written for sticky Auto: {text2}"
+        );
+        let loaded2 =
+            Config::load_from_path(&path, Config::with_home(Path::new("/home/test"), None))
+                .unwrap();
+        assert_eq!(loaded2.one_fps, Some(0));
+        assert_eq!(loaded2.fullscreen_output.as_deref(), Some("HDMI-A-1"));
+        assert!(loaded2.audio_default);
+        assert!(!loaded2.copy_path);
+
+        // Unset one_fps / fullscreen_output (None) omits those keys.
+        cfg.one_fps = None;
+        cfg.fullscreen_output = None;
+        cfg.save_to_path(&path).unwrap();
+        let text3 = fs::read_to_string(&path).unwrap();
+        assert!(
+            !text3.lines().any(|l| l.trim_start().starts_with("one_fps")),
+            "one_fps omitted when None: {text3}"
+        );
+        assert!(
+            !text3
+                .lines()
+                .any(|l| l.trim_start().starts_with("fullscreen_output")),
+            "fullscreen_output omitted when None: {text3}"
+        );
+        assert!(text3.contains("audio_default"), "{text3}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_to_path_creates_missing_parent_dirs() {
+        let dir = temp_cfg_dir();
+        let path = dir.join("a").join("b").join("config.toml");
+        let cfg = Config::with_home(Path::new("/home/test"), None);
+        cfg.save_to_path(&path).unwrap();
+        assert!(path.is_file());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
