@@ -5,12 +5,12 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use record_ui::ipc::{IpcRequest, IpcResponse};
-use record_ui::server::{self, RuntimePaths};
+use hyprcap::ipc::{IpcRequest, IpcResponse};
+use hyprcap::server::{self, RuntimePaths};
 
-/// record-ui — native frontend for wf-recorder (Hyprland / wlroots).
+/// hyprcap — native frontend for wf-recorder (Hyprland / wlroots).
 #[derive(Debug, Parser)]
-#[command(name = "record-ui", version, about)]
+#[command(name = "hyprcap", version, about)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -80,7 +80,7 @@ pub fn run() -> i32 {
     match dispatch(cmd) {
         Ok(code) => code,
         Err(msg) => {
-            eprintln!("record-ui: {msg}");
+            eprintln!("hyprcap: {msg}");
             1
         }
     }
@@ -90,7 +90,7 @@ fn run_server() -> i32 {
     match server::run_production_server() {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("record-ui server: {e}");
+            eprintln!("hyprcap server: {e}");
             1
         }
     }
@@ -131,13 +131,13 @@ fn dispatch(cmd: Command) -> Result<i32, String> {
         }
         Command::ListOutputs => {
             // Prefer hyprctl rich inventory; names-only fallback prints name alone.
-            let inv = record_ui::sys::list_output_inventory();
+            let inv = hyprcap::sys::list_output_inventory();
             let mut out = std::io::stdout();
             for o in &inv {
                 writeln!(out, "{}", o.display_line()).map_err(|e| e.to_string())?;
             }
             if inv.is_empty() {
-                eprintln!("record-ui: no outputs discovered (hyprctl monitors / wf-recorder -L)");
+                eprintln!("hyprcap: no outputs discovered (hyprctl monitors / wf-recorder -L)");
                 Ok(1)
             } else {
                 Ok(0)
@@ -200,7 +200,7 @@ fn exit_from(resp: &IpcResponse) -> i32 {
 pub fn runtime_dir_from_env() -> PathBuf {
     runtime_paths()
         .map(|p| p.runtime_dir)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/record-ui-fallback"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/hyprcap-fallback"))
 }
 
 #[cfg(test)]
@@ -209,11 +209,11 @@ mod tests {
 
     #[test]
     fn server_mode_only_argv1() {
-        let args = vec!["record-ui".into(), "--server".into()];
+        let args = vec!["hyprcap".into(), "--server".into()];
         assert!(is_server_mode(&args));
-        let args = vec!["record-ui".into(), "status".into(), "--server".into()];
+        let args = vec!["hyprcap".into(), "status".into(), "--server".into()];
         assert!(!is_server_mode(&args));
-        let args = vec!["record-ui".into(), "status".into()];
+        let args = vec!["hyprcap".into(), "status".into()];
         assert!(!is_server_mode(&args));
     }
 }

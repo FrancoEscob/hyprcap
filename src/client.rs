@@ -1,4 +1,4 @@
-//! IPC client over `$XDG_RUNTIME_DIR/record-ui.sock`.
+//! IPC client over `$XDG_RUNTIME_DIR/hyprcap.sock`.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;

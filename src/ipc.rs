@@ -140,7 +140,7 @@ impl IpcRequest {
     }
 }
 
-/// Status snapshot embedded in every response / printed by `record-ui status`.
+/// Status snapshot embedded in every response / printed by `hyprcap status`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IpcStatus {
     pub state: String,

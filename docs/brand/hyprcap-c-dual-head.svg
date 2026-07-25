@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Hyprcap">
+  <!-- C: dual monitors (signature feature) + shared rec -->
+  <rect width="128" height="128" rx="28" fill="#0c0e12"/>
+  <!-- left head -->
+  <rect x="16" y="34" width="50" height="40" rx="6" fill="none" stroke="#e8eaed" stroke-width="5"/>
+  <rect x="24" y="42" width="34" height="24" rx="2" fill="#1a1f2a"/>
+  <!-- right head offset (layout-true vibe) -->
+  <rect x="62" y="48" width="50" height="36" rx="6" fill="none" stroke="#e8eaed" stroke-width="5"/>
+  <rect x="70" y="55" width="34" height="22" rx="2" fill="#1a1f2a"/>
+  <!-- rec badge overlapping both -->
+  <circle cx="64" cy="42" r="9" fill="#ef4444"/>
+  <circle cx="64" cy="42" r="13" fill="none" stroke="#ef4444" stroke-width="2" opacity="0.4"/>
+  <!-- base bar -->
+  <rect x="36" y="96" width="56" height="6" rx="3" fill="#3f4654"/>
+</svg>

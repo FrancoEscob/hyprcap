@@ -241,9 +241,9 @@ where
     capture_output: Option<String>,
     /// Active capture mode while Starting/Recording/Stopping.
     capture_mode: Option<CaptureMode>,
-    /// Both primary temp (`.record-ui-both-*-A.mkv`).
+    /// Both primary temp (`.hyprcap-both-*-A.mkv`).
     both_temp_a: Option<PathBuf>,
-    /// Both secondary temp (`.record-ui-both-*-B.mkv`).
+    /// Both secondary temp (`.hyprcap-both-*-B.mkv`).
     both_temp_b: Option<PathBuf>,
     /// Layout fixed at Both start for layout-true stitch.
     both_layout: Option<BothLayout>,
@@ -896,7 +896,7 @@ where
             } else {
                 "Recording started".to_string()
             };
-            let _ = self.notifier.notify("record-ui", &body);
+            let _ = self.notifier.notify("Hyprcap", &body);
         }
     }
 
@@ -1169,7 +1169,7 @@ where
                     } else {
                         format!("Saved {path_str}")
                     };
-                    if let Err(e) = self.notifier.notify("record-ui", &body) {
+                    if let Err(e) = self.notifier.notify("Hyprcap", &body) {
                         warnings.push(format!("notify failed: {e}"));
                     }
                 }
@@ -1271,7 +1271,7 @@ where
         self.state = State::Idle;
         self.last_error = Some(msg.clone());
         if self.config.notify {
-            let _ = self.notifier.notify("record-ui", &msg);
+            let _ = self.notifier.notify("Hyprcap", &msg);
         }
     }
 
@@ -1347,7 +1347,7 @@ where
         }
         self.last_error = Some(msg.clone());
         if self.config.notify {
-            let _ = self.notifier.notify("record-ui", &msg);
+            let _ = self.notifier.notify("Hyprcap", &msg);
         }
         CommandResult::err(MachineCode::StopTimeout, msg)
     }
@@ -1389,7 +1389,7 @@ where
                 self.last_error = Some(msg.clone());
                 self.output_path = None;
                 if self.config.notify {
-                    let _ = self.notifier.notify("record-ui", &msg);
+                    let _ = self.notifier.notify("Hyprcap", &msg);
                 }
                 return CommandResult::err(MachineCode::IoError, msg);
             }
@@ -1404,7 +1404,7 @@ where
             self.last_error = Some(msg.clone());
             self.output_path = None;
             if self.config.notify {
-                let _ = self.notifier.notify("record-ui", &msg);
+                let _ = self.notifier.notify("Hyprcap", &msg);
             }
             return CommandResult::err(MachineCode::IoError, msg);
         }
@@ -1418,7 +1418,7 @@ where
             self.last_error = Some(msg.clone());
             self.output_path = None;
             if self.config.notify {
-                let _ = self.notifier.notify("record-ui", &msg);
+                let _ = self.notifier.notify("Hyprcap", &msg);
             }
             return CommandResult::err(MachineCode::IoError, msg);
         }
@@ -1445,7 +1445,7 @@ where
             } else {
                 format!("Saved {path_str}")
             };
-            if let Err(e) = self.notifier.notify("record-ui", &body) {
+            if let Err(e) = self.notifier.notify("Hyprcap", &body) {
                 warnings.push(format!("notify failed: {e}"));
             }
         }
@@ -1755,8 +1755,8 @@ pub fn resolve_fullscreen_output(
         }
         return Err(format!(
             "unknown Wayland output {name:?}; known: {}. \
-             Use record-ui list-outputs or set fullscreen_output in \
-             ~/.config/record-ui/config.toml",
+             Use hyprcap list-outputs or set fullscreen_output in \
+             ~/.config/hyprcap/config.toml",
             format_known_outputs(inventory)
         ));
     }
@@ -1764,13 +1764,13 @@ pub fn resolve_fullscreen_output(
     match inventory.len() {
         0 => Err("cannot resolve Wayland output: no outputs discovered \
              (hyprctl monitors / wf-recorder -L). Multi-monitor setups need \
-             fullscreen_output in ~/.config/record-ui/config.toml or --output NAME \
-             (record-ui list-outputs)."
+             fullscreen_output in ~/.config/hyprcap/config.toml or --output NAME \
+             (hyprcap list-outputs)."
             .to_string()),
         1 => Ok(inventory[0].clone()),
         _ => Err(format!(
-            "multi-monitor: set fullscreen_output in ~/.config/record-ui/config.toml \
-             or pass --output NAME (known: {}). See also: record-ui list-outputs",
+            "multi-monitor: set fullscreen_output in ~/.config/hyprcap/config.toml \
+             or pass --output NAME (known: {}). See also: hyprcap list-outputs",
             format_known_outputs(inventory)
         )),
     }
@@ -2041,11 +2041,11 @@ fn both_session_id(clock: &dyn Clock) -> String {
     }
 }
 
-/// Temp paths: `.record-ui-both-<id>-A.mkv` / `-B.mkv` under `output_dir`.
+/// Temp paths: `.hyprcap-both-<id>-A.mkv` / `-B.mkv` under `output_dir`.
 pub fn both_temp_paths(output_dir: &Path, session_id: &str) -> (PathBuf, PathBuf) {
     (
-        output_dir.join(format!(".record-ui-both-{session_id}-A.mkv")),
-        output_dir.join(format!(".record-ui-both-{session_id}-B.mkv")),
+        output_dir.join(format!(".hyprcap-both-{session_id}-A.mkv")),
+        output_dir.join(format!(".hyprcap-both-{session_id}-B.mkv")),
     )
 }
 
@@ -2563,7 +2563,7 @@ mod tests {
     impl TempPaths {
         fn new() -> Self {
             let root = std::env::temp_dir().join(format!(
-                "record-ui-test-{}-{}",
+                "hyprcap-test-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -3788,7 +3788,7 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.contains("record-ui-both"))
+            .filter(|n| n.contains("hyprcap-both"))
             .collect();
         assert!(leftover.is_empty(), "temps should be deleted: {leftover:?}");
 
@@ -3796,9 +3796,9 @@ mod tests {
         let final_path = rec.last_success_path().unwrap();
         let final_str = final_path.display().to_string();
         assert_eq!(rec.clipboard().texts, vec![final_str.clone()]);
-        assert!(!final_str.contains("record-ui-both"));
+        assert!(!final_str.contains("hyprcap-both"));
         for (_, body) in &rec.notifier().calls {
-            assert!(!body.contains("record-ui-both"), "notify body: {body}");
+            assert!(!body.contains("hyprcap-both"), "notify body: {body}");
         }
         assert!(final_path.extension().and_then(|e| e.to_str()) == Some("mp4"));
         assert!(file_nonempty(final_path).unwrap());
@@ -3836,7 +3836,7 @@ mod tests {
         assert!(r.message.contains("peer death"), "{r:?}");
         assert!(r.message.contains("no stitch"), "{r:?}");
         assert!(
-            r.message.contains("record-ui-both") || r.message.contains("temps="),
+            r.message.contains("hyprcap-both") || r.message.contains("temps="),
             "temp paths in error: {r:?}"
         );
         assert_eq!(rec.state(), State::Idle);
@@ -3849,7 +3849,7 @@ mod tests {
         let err = rec.status().last_error.expect("last_error");
         assert!(err.contains("peer death"), "{err}");
         assert!(
-            err.contains("temps=") || err.contains("record-ui-both"),
+            err.contains("temps=") || err.contains("hyprcap-both"),
             "{err}"
         );
 
@@ -3974,7 +3974,7 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.contains("record-ui-both"))
+            .filter(|n| n.contains("hyprcap-both"))
             .collect();
         assert_eq!(leftover.len(), 2, "retain temps: {leftover:?}");
     }
@@ -4138,7 +4138,7 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.contains("record-ui-both"))
+            .filter(|n| n.contains("hyprcap-both"))
             .collect();
         assert_eq!(leftover.len(), 2, "retain both temps: {leftover:?}");
     }

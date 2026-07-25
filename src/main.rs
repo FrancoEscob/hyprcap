@@ -1,4 +1,4 @@
-//! record-ui — CLI client / optional GUI view / internal `--server` daemon.
+//! hyprcap — CLI client / optional GUI view / internal `--server` daemon.
 //!
 //! GTK/Adwaita are initialized only on the `gui` path (`ui::run_gui`).
 

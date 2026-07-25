@@ -1,4 +1,4 @@
-//! File-based config (`$XDG_CONFIG_HOME/record-ui/config.toml`) with SPEC defaults.
+//! File-based config (`$XDG_CONFIG_HOME/hyprcap/config.toml`) with SPEC defaults.
 
 use std::env;
 use std::fs;
@@ -327,7 +327,7 @@ one_fps = 144
 
     fn temp_cfg_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "record-ui-cfg-test-{}-{}",
+            "hyprcap-cfg-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -342,7 +342,7 @@ one_fps = 144
     fn save_to_path_roundtrip_one_pickers() {
         let dir = temp_cfg_dir();
         // Nested path: save must create parent dirs.
-        let path = dir.join("nested").join("record-ui").join("config.toml");
+        let path = dir.join("nested").join("hyprcap").join("config.toml");
 
         let mut cfg = Config::with_home(Path::new("/home/test"), None);
         cfg.audio_default = true;

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Hyprcap">
+  <!-- A: monitor frame + REC dot — clearest app icon -->
+  <rect width="128" height="128" rx="28" fill="#0c0e12"/>
+  <!-- outer bezel -->
+  <rect x="22" y="28" width="84" height="62" rx="10" fill="none" stroke="#e8eaed" stroke-width="6"/>
+  <!-- inner screen glow -->
+  <rect x="32" y="38" width="64" height="42" rx="4" fill="#161a22"/>
+  <!-- subtle scan / content lines -->
+  <rect x="40" y="48" width="28" height="4" rx="2" fill="#3d4654"/>
+  <rect x="40" y="58" width="40" height="4" rx="2" fill="#2a3140"/>
+  <rect x="40" y="68" width="22" height="4" rx="2" fill="#2a3140"/>
+  <!-- REC -->
+  <circle cx="86" cy="48" r="7" fill="#ef4444"/>
+  <circle cx="86" cy="48" r="10" fill="none" stroke="#ef4444" stroke-width="2" opacity="0.35"/>
+  <!-- stand -->
+  <path d="M54 90h20l4 10H50l4-10z" fill="#e8eaed"/>
+  <rect x="44" y="100" width="40" height="5" rx="2.5" fill="#e8eaed"/>
+</svg>

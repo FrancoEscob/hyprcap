@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Hyprcap
+GenericName=Screen Recorder
+Comment=Lightweight screen recorder for Hyprland (wf-recorder)
+Exec=hyprcap gui
+Icon=hyprcap
+Terminal=false
+Categories=AudioVideo;Video;Recorder;GTK;
+Keywords=record;screen;wf-recorder;hyprland;wayland;region;monitor;dual;hyprcap;
+StartupNotify=true
+StartupWMClass=dev.hyprcap.app

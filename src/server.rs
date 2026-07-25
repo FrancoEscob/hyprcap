@@ -1,7 +1,7 @@
 //! Session server: Unix socket + pid file, sole `Recorder` owner.
 //!
-//! Socket: `$XDG_RUNTIME_DIR/record-ui.sock` mode `0600`.
-//! Pid: `$XDG_RUNTIME_DIR/record-ui.pid`.
+//! Socket: `$XDG_RUNTIME_DIR/hyprcap.sock` mode `0600`.
+//! Pid: `$XDG_RUNTIME_DIR/hyprcap.pid`.
 //! Framing: newline-delimited JSON.
 //!
 //! # Trust model
@@ -43,9 +43,9 @@ use crate::sys::{
     ProcessSpawner, SystemClock, WlCopyClipboard,
 };
 
-pub const SOCKET_NAME: &str = "record-ui.sock";
-pub const PID_NAME: &str = "record-ui.pid";
-pub const LOCK_NAME: &str = "record-ui.lock";
+pub const SOCKET_NAME: &str = "hyprcap.sock";
+pub const PID_NAME: &str = "hyprcap.pid";
+pub const LOCK_NAME: &str = "hyprcap.lock";
 
 /// Cap for a single IPC request/response line (DoS guard).
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
@@ -148,9 +148,9 @@ enum ConnAction {
 
 /// Bind the Unix socket with mode `0600`, write pid file.
 ///
-/// Serializes acquisition with exclusive `flock` on `record-ui.lock`.
+/// Serializes acquisition with exclusive `flock` on `hyprcap.lock`.
 /// If the address is in use: try connect; if connect fails and pid is not a live
-/// record-ui server → remove stale socket/pid and rebind.
+/// hyprcap server → remove stale socket/pid and rebind.
 pub fn acquire_listener(paths: &RuntimePaths) -> Result<BoundServer, AcquireError> {
     ensure_runtime_dir(&paths.runtime_dir)?;
 
@@ -180,7 +180,7 @@ pub fn acquire_listener(paths: &RuntimePaths) -> Result<BoundServer, AcquireErro
 ///
 /// Fail closed: reject attacker-precreated dirs we do not own; chmod failures are
 /// errors. Production never resolves to bare `/tmp` or predictable
-/// `/tmp/record-ui-$UID` ([`crate::ports::default_runtime_dir`]); unique temp
+/// `/tmp/hyprcap-$UID` ([`crate::ports::default_runtime_dir`]); unique temp
 /// subdirs (tests) pass if owned by euid and private.
 pub fn validate_private_runtime_dir(dir: &Path) -> Result<(), AcquireError> {
     use std::os::unix::fs::MetadataExt;
@@ -284,7 +284,7 @@ fn recover_or_busy(paths: &RuntimePaths) -> Result<UnixListener, AcquireError> {
         return Err(AcquireError::AlreadyRunning);
     }
 
-    // Connect failed — check whether pid is a live *record-ui* server.
+    // Connect failed — check whether pid is a live *hyprcap* server.
     let ours_alive = match read_pid_file(&paths.pid_path) {
         Some(pid) => pid_alive(pid) && is_our_server_pid(pid),
         None => false,
@@ -474,7 +474,7 @@ where
             Ok((stream, _)) => {
                 // Connection-local errors must not kill the daemon.
                 if let Err(e) = handle_connection(stream, &mut state) {
-                    eprintln!("record-ui server: connection error: {e}");
+                    eprintln!("hyprcap server: connection error: {e}");
                 }
                 reap_disconnected_gui_views(&mut state);
                 if state.shutdown {
@@ -490,7 +490,7 @@ where
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => {
                 // Listener-level fatal.
-                eprintln!("record-ui server: accept error: {e}");
+                eprintln!("hyprcap server: accept error: {e}");
                 return Err(e);
             }
         }
@@ -900,7 +900,7 @@ fn write_response(writer: &mut UnixStream, resp: &IpcResponse) -> std::io::Resul
 // Production entry
 // ---------------------------------------------------------------------------
 
-/// Production server entry used by `record-ui --server`.
+/// Production server entry used by `hyprcap --server`.
 pub fn run_production_server() -> Result<(), Box<dyn std::error::Error>> {
     let env_paths = EnvPaths::from_env();
     let runtime = RuntimePaths::from_runtime_dir(env_paths.runtime_dir());
@@ -938,8 +938,8 @@ fn resolve_server_exe() -> Result<PathBuf, std::io::Error> {
         return Ok(current);
     }
 
-    // Prefer a live `record-ui` on PATH (typical: ~/.local/bin or ~/.cargo/bin).
-    if let Some(p) = crate::sys::which("record-ui") {
+    // Prefer a live `hyprcap` on PATH (typical: ~/.local/bin or ~/.cargo/bin).
+    if let Some(p) = crate::sys::which("hyprcap") {
         if p.is_file() {
             return Ok(p);
         }
@@ -962,7 +962,7 @@ fn resolve_server_exe() -> Result<PathBuf, std::io::Error> {
     Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,
         format!(
-            "could not find record-ui binary to spawn session server (current_exe={current:?})"
+            "could not find hyprcap binary to spawn session server (current_exe={current:?})"
         ),
     ))
 }
@@ -1240,7 +1240,7 @@ mod tests {
 
     fn temp_runtime() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "record-ui-ipc-{}-{}",
+            "hyprcap-ipc-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

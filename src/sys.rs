@@ -569,7 +569,7 @@ impl Notifier for NotifySendNotifier {
             Err(e) => {
                 if !self.warned_missing {
                     self.warned_missing = true;
-                    eprintln!("record-ui: notify-send unavailable ({e}); notifications disabled");
+                    eprintln!("hyprcap: notify-send unavailable ({e}); notifications disabled");
                 }
                 Err(PortError::Other(format!("notify-send: {e}")))
             }
@@ -594,7 +594,7 @@ impl Clipboard for WlCopyClipboard {
             Err(e) => {
                 if !self.warned_missing {
                     self.warned_missing = true;
-                    eprintln!("record-ui: wl-copy unavailable ({e}); path copy disabled");
+                    eprintln!("hyprcap: wl-copy unavailable ({e}); path copy disabled");
                 }
                 return Err(PortError::Other(format!("wl-copy: {e}")));
             }
@@ -916,7 +916,7 @@ pub fn pid_alive(pid: u32) -> bool {
     err.raw_os_error() == Some(libc::EPERM)
 }
 
-/// True if `pid` looks like a record-ui process (`/proc/pid/comm`).
+/// True if `pid` looks like a hyprcap process (`/proc/pid/comm`).
 ///
 /// Used to avoid treating PID reuse of an unrelated process as a live server.
 pub fn is_our_server_pid(pid: u32) -> bool {
@@ -925,8 +925,8 @@ pub fn is_our_server_pid(pid: u32) -> bool {
         return false;
     };
     let name = text.trim();
-    // comm is truncated to 15 chars on Linux ("record-ui" fits).
-    name == "record-ui" || name.starts_with("record-ui")
+    // comm is truncated to 15 chars on Linux ("hyprcap" fits).
+    name == "hyprcap" || name.starts_with("hyprcap")
 }
 
 /// Read first line of a pid file as u32.

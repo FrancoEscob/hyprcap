@@ -1,17 +1,21 @@
 [package]
-name = "record-ui"
+name = "hyprcap"
 version = "0.1.0"
 edition = "2021"
-description = "Native frontend for wf-recorder on Hyprland / wlroots"
+description = "Lightweight pure-Rust screen recorder for Hyprland (wf-recorder + GTK4)"
 license = "MIT"
 publish = false
+repository = "https://github.com/FrancoEscob/hyprcap"
+readme = "README.md"
+keywords = ["hyprland", "wayland", "screen-recorder", "wf-recorder"]
+categories = ["multimedia"]
 
 [lib]
-name = "record_ui"
+name = "hyprcap"
 path = "src/lib.rs"
 
 [[bin]]
-name = "record-ui"
+name = "hyprcap"
 path = "src/main.rs"
 
 [dependencies]
@@ -21,6 +25,6 @@ thiserror = "2"
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
-# GUI path only (`record-ui gui`); CLI paths never call adw/gtk init.
+# GUI path only (`hyprcap gui`); CLI paths never call adw/gtk init.
 gtk4 = "0.9"
 libadwaita = "0.7"

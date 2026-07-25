@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Hyprcap">
+  <!-- B: minimal — rounded square, frame glyph, rec only -->
+  <rect width="128" height="128" rx="28" fill="#0a0b0f"/>
+  <!-- open frame (not closed box) — “capture window” -->
+  <path d="M36 44
+           h20 M36 44 v20
+           M92 44 h-20 M92 44 v20
+           M36 84 h20 M36 84 v-20
+           M92 84 h-20 M92 84 v-20"
+        fill="none" stroke="#f4f4f5" stroke-width="8" stroke-linecap="square"/>
+  <circle cx="64" cy="64" r="11" fill="#ef4444"/>
+</svg>

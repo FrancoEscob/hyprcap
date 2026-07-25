@@ -173,18 +173,18 @@ pub fn default_videos_dir(home: &Path, xdg_user_dir_videos: Option<&Path>) -> Pa
     home.join("Videos")
 }
 
-/// Config file path: `$XDG_CONFIG_HOME/record-ui/config.toml` or `~/.config/...`.
+/// Config file path: `$XDG_CONFIG_HOME/hyprcap/config.toml` or `~/.config/...`.
 pub fn default_config_path(xdg_config_home: Option<&Path>, home: &Path) -> PathBuf {
     let base = xdg_config_home
         .map(Path::to_path_buf)
         .unwrap_or_else(|| home.join(".config"));
-    base.join("record-ui").join("config.toml")
+    base.join("hyprcap").join("config.toml")
 }
 
 /// Runtime dir for socket/pid.
 ///
 /// Prefers `$XDG_RUNTIME_DIR`, then `/run/user/$UID`.
-/// **Never** falls back to `/tmp` or predictable `/tmp/record-ui-$UID` (multi-user risk).
+/// **Never** falls back to `/tmp` or predictable `/tmp/hyprcap-$UID` (multi-user risk).
 /// Callers must validate ownership/mode via [`crate::server`] acquire path before binding.
 pub fn default_runtime_dir(xdg_runtime_dir: Option<&Path>) -> PathBuf {
     if let Some(p) = xdg_runtime_dir {

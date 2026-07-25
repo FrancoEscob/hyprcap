@@ -1,6 +1,6 @@
 //! GTK4 + libadwaita GUI view (client only).
 //!
-//! Opened solely via `record-ui` / `record-ui gui`. Closing the window
+//! Opened solely via `hyprcap` / `hyprcap gui`. Closing the window
 //! disconnects this view — it does **not** stop an active recording.
 //!
 //! Long IPC (start_region/slurp) runs on dedicated threads so Stop/status
@@ -24,11 +24,11 @@ use gtk4::{
 };
 use libadwaita as adw;
 use libadwaita::prelude::*;
-use record_ui::client::{self, ClientError};
-use record_ui::config::Config;
-use record_ui::ipc::{IpcCommand, IpcRequest, IpcResponse, IpcStatus};
-use record_ui::server::{self, RuntimePaths};
-use record_ui::sys::{self, EnvPaths, OutputInfo};
+use hyprcap::client::{self, ClientError};
+use hyprcap::config::Config;
+use hyprcap::ipc::{IpcCommand, IpcRequest, IpcResponse, IpcStatus};
+use hyprcap::server::{self, RuntimePaths};
+use hyprcap::sys::{self, EnvPaths, OutputInfo};
 
 /// Primary entry: ensure session server, open small Adwaita window.
 ///
@@ -37,24 +37,24 @@ pub fn run_gui() -> i32 {
     let paths = match RuntimePaths::from_env() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("record-ui: {e}");
+            eprintln!("hyprcap: {e}");
             return 1;
         }
     };
 
     if let Err(e) = server::ensure_server(&paths) {
-        eprintln!("record-ui: failed to start session server: {e}");
+        eprintln!("hyprcap: failed to start session server: {e}");
         return 1;
     }
 
     // Init Adwaita/GTK only on this path — never from CLI subcommands.
     if let Err(e) = adw::init() {
-        eprintln!("record-ui: failed to initialize libadwaita: {e}");
+        eprintln!("hyprcap: failed to initialize libadwaita: {e}");
         return 1;
     }
 
     let app = adw::Application::builder()
-        .application_id("dev.recordui.app")
+        .application_id("dev.hyprcap.app")
         .build();
 
     let socket_path = paths.socket_path.clone();
@@ -517,7 +517,7 @@ fn build_window(
     // Compact control surface — Hyprland also floats+sizes via window rule.
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("record-ui")
+        .title("Hyprcap")
         .default_width(320)
         .default_height(320)
         .resizable(true)
@@ -1259,7 +1259,7 @@ fn apply_msg(msg: UiMsg, view: &Rc<RefCell<ViewState>>, w: &UiWidgets, closed: &
         }
         UiMsg::SubscribeFailed(e) => {
             w.msg_label.set_text(&e);
-            eprintln!("record-ui: {e}");
+            eprintln!("hyprcap: {e}");
             // Hard-fail the view: close without stopping recording.
             if let Some(win) = w.window.upgrade() {
                 win.close();
@@ -1798,7 +1798,7 @@ fn persist_one_pickers(output: Option<&str>, fps: Option<u32>) -> Result<(), Str
     let paths = EnvPaths::from_env();
     let mut cfg = Config::load(&paths).map_err(|e| {
         let msg = format!("Could not save settings: {e}");
-        eprintln!("record-ui: {msg}");
+        eprintln!("hyprcap: {msg}");
         msg
     })?;
     if let Some(name) = output.map(str::trim).filter(|s| !s.is_empty()) {
@@ -1808,7 +1808,7 @@ fn persist_one_pickers(output: Option<&str>, fps: Option<u32>) -> Result<(), Str
     cfg.one_fps = Some(fps.unwrap_or(0));
     cfg.save(&paths).map_err(|e| {
         let msg = format!("Could not save settings: {e}");
-        eprintln!("record-ui: {msg}");
+        eprintln!("hyprcap: {msg}");
         msg
     })
 }
@@ -1816,7 +1816,7 @@ fn persist_one_pickers(output: Option<&str>, fps: Option<u32>) -> Result<(), Str
 #[cfg(test)]
 mod picker_tests {
     use super::*;
-    use record_ui::sys::OutputInfo;
+    use hyprcap::sys::OutputInfo;
 
     fn out(name: &str, w: Option<i32>, h: Option<i32>, refresh: Option<f64>) -> OutputInfo {
         OutputInfo {

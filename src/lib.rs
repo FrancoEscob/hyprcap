@@ -1,4 +1,4 @@
-//! record-ui library: ports, config, Recorder, IPC server/client.
+//! hyprcap library: ports, config, Recorder, IPC server/client.
 //!
 //! The binary (`main.rs`) wires CLI and the optional GUI view. GTK/adw live only
 //! in the binary `ui` module and are never initialized from library code.

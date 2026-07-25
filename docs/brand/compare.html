@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hyprcap — logo compare (temp)</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #181b22;
+      --text: #e8eaed;
+      --muted: #9aa0a6;
+      --border: #2a2f3a;
+      --accent: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      padding: 24px 20px 64px;
+    }
+    header {
+      max-width: 1100px;
+      margin: 0 auto 28px;
+    }
+    h1 { font-size: 1.35rem; font-weight: 650; margin: 0 0 6px; }
+    p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.85em;
+      background: #22262f;
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+    .toolbar {
+      max-width: 1100px;
+      margin: 16px auto 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    .toolbar label { color: var(--muted); font-size: 0.85rem; }
+    .toolbar button {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 12px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .toolbar button:hover { border-color: #4b5563; }
+    .toolbar button.active { border-color: var(--accent); color: #fff; }
+    section {
+      max-width: 1100px;
+      margin: 32px auto 0;
+    }
+    h2 {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin: 0 0 12px;
+      font-weight: 600;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 14px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .card .stage {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 20px 12px;
+      min-height: 200px;
+      background:
+        linear-gradient(45deg, #1a1d24 25%, transparent 25%),
+        linear-gradient(-45deg, #1a1d24 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #1a1d24 75%),
+        linear-gradient(-45deg, transparent 75%, #1a1d24 75%);
+      background-size: 16px 16px;
+      background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+      background-color: #12141a;
+    }
+    body.bg-light .card .stage {
+      background-color: #d4d4d8;
+      background-image:
+        linear-gradient(45deg, #e4e4e7 25%, transparent 25%),
+        linear-gradient(-45deg, #e4e4e7 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #e4e4e7 75%),
+        linear-gradient(-45deg, transparent 75%, #e4e4e7 75%);
+    }
+    body.bg-solid-dark .card .stage {
+      background: #0a0a0a;
+    }
+    body.bg-solid-light .card .stage {
+      background: #f4f4f5;
+    }
+    .card .stage img.svg-main,
+    .card .stage object {
+      width: var(--preview, 128px);
+      height: var(--preview, 128px);
+      object-fit: contain;
+      display: block;
+      border-radius: 22%;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    }
+    .card .meta {
+      padding: 12px 14px 14px;
+      border-top: 1px solid var(--border);
+    }
+    .card .meta strong {
+      display: block;
+      font-size: 0.95rem;
+      margin-bottom: 4px;
+    }
+    .card .meta span {
+      display: block;
+      font-size: 0.78rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    .sizes {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+      margin-top: 10px;
+    }
+    .sizes img {
+      border-radius: 20%;
+      background: #0a0a0a;
+      box-shadow: 0 0 0 1px var(--border);
+    }
+    body.bg-light .sizes img,
+    body.bg-solid-light .sizes img {
+      background: #fff;
+    }
+    footer {
+      max-width: 1100px;
+      margin: 40px auto 0;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Hyprcap — logo compare</h1>
+    <p>Temporal. Archivos en <code>docs/brand/</code>. Abrí este HTML en el browser (file:// o live server).</p>
+  </header>
+
+  <div class="toolbar">
+    <label>Preview size:</label>
+    <button type="button" data-size="64">64</button>
+    <button type="button" data-size="96">96</button>
+    <button type="button" class="active" data-size="128">128</button>
+    <button type="button" data-size="192">192</button>
+    <label style="margin-left:12px">Stage bg:</label>
+    <button type="button" class="active" data-bg="">Checker dark</button>
+    <button type="button" data-bg="bg-solid-dark">Solid dark</button>
+    <button type="button" data-bg="bg-solid-light">Solid light</button>
+    <button type="button" data-bg="bg-light">Checker light</button>
+  </div>
+
+  <section>
+    <h2>SVG (source of truth)</h2>
+    <div class="grid" id="svg-grid"></div>
+  </section>
+
+  <section>
+    <h2>Imagine (exploratory)</h2>
+    <div class="grid" id="imagine-grid"></div>
+  </section>
+
+  <footer>
+    Temp gallery — delete <code>compare.html</code> when you pick a winner.
+  </footer>
+
+  <script>
+    const svgItems = [
+      { id: "A", title: "Frame + REC", file: "hyprcap-a-frame-rec.svg", note: "Monitor + red LED" },
+      { id: "B", title: "Viewfinder minimal", file: "hyprcap-b-mark-minimal.svg", note: "Corners + center rec" },
+      { id: "C", title: "Dual head", file: "hyprcap-c-dual-head.svg", note: "2 monitors + rec" },
+      { id: "D", title: "H monogram", file: "hyprcap-d-h-rec.svg", note: "Hypr H + rec" },
+      { id: "E", title: "Wordmark tile", file: "hyprcap-e-wordmark-tile.svg", note: "Icon + hyprcap text" },
+    ];
+    const imagineItems = [
+      { id: "I1", title: "Imagine · frame", file: "imagine-frame-rec.jpg", note: "Monitor outline + glow LED" },
+      { id: "I2", title: "Imagine · viewfinder", file: "imagine-viewfinder.jpg", note: "Capture brackets + rec" },
+      { id: "I3", title: "Imagine · dual", file: "imagine-dual-head.jpg", note: "Two monitors + rec" },
+    ];
+
+    function card(item, isSvg) {
+      const src = item.file;
+      const pngFallback = isSvg ? item.file.replace(/\.svg$/, ".png") : null;
+      const sizes = isSvg
+        ? `<div class="sizes" title="scale previews (same asset)">
+             <img src="${src}" width="24" height="24" alt="" />
+             <img src="${src}" width="32" height="32" alt="" />
+             <img src="${src}" width="48" height="48" alt="" />
+             <img src="${src}" width="64" height="64" alt="" />
+           </div>`
+        : "";
+      return `<article class="card">
+        <div class="stage">
+          <img class="svg-main" src="${src}" alt="${item.title}" />
+        </div>
+        <div class="meta">
+          <strong>${item.id} · ${item.title}</strong>
+          <span>${item.note}</span>
+          <span>${src}${pngFallback ? " · also " + pngFallback : ""}</span>
+          ${sizes}
+        </div>
+      </article>`;
+    }
+
+    document.getElementById("svg-grid").innerHTML = svgItems.map((i) => card(i, true)).join("");
+    document.getElementById("imagine-grid").innerHTML = imagineItems.map((i) => card(i, false)).join("");
+
+    document.querySelectorAll("[data-size]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("[data-size]").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        document.documentElement.style.setProperty("--preview", btn.dataset.size + "px");
+      });
+    });
+    document.querySelectorAll("[data-bg]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("[data-bg]").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        document.body.className = btn.dataset.bg || "";
+      });
+    });
+  </script>
+</body>
+</html>
