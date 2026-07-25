@@ -926,10 +926,51 @@ pub fn run_production_server() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Resolve the on-disk binary used to spawn `--server`.
+///
+/// `current_exe()` can point at a **deleted** inode after `cargo install` /
+/// overwrite while the GUI is still running (`… (deleted)` on Linux) — spawn
+/// then fails with `ENOENT`. Fall back to PATH / argv0 basename.
+fn resolve_server_exe() -> Result<PathBuf, std::io::Error> {
+    let current = std::env::current_exe()?;
+    let lossy = current.to_string_lossy();
+    if current.is_file() && !lossy.contains("(deleted)") {
+        return Ok(current);
+    }
+
+    // Prefer a live `record-ui` on PATH (typical: ~/.local/bin or ~/.cargo/bin).
+    if let Some(p) = crate::sys::which("record-ui") {
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+
+    if let Some(a0) = std::env::args_os().next() {
+        let p = PathBuf::from(&a0);
+        if p.is_file() {
+            return Ok(p);
+        }
+        if let Some(name) = p.file_name() {
+            if let Some(found) = crate::sys::which(&name.to_string_lossy()) {
+                if found.is_file() {
+                    return Ok(found);
+                }
+            }
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!(
+            "could not find record-ui binary to spawn session server (current_exe={current:?})"
+        ),
+    ))
+}
+
 /// Spawn a detached `--server` child of the current executable.
 pub fn spawn_daemon(runtime_dir: &Path) -> Result<std::process::Child, std::io::Error> {
-    let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(exe);
+    let exe = resolve_server_exe()?;
+    let mut cmd = std::process::Command::new(&exe);
     cmd.arg("--server")
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .stdin(std::process::Stdio::null())

@@ -532,13 +532,18 @@ fn build_window(
     let mode_row = GtkBox::new(Orientation::Horizontal, 6);
     let region_btn = ToggleButton::with_label("Region");
     let full_btn = ToggleButton::with_label("One monitor");
-    let both_btn = ToggleButton::with_label("Both");
+    // Label says "2 monitors" (not "Both") — only exactly two heads are supported.
+    let both_btn = ToggleButton::with_label("2 monitors");
     region_btn.set_active(true);
     full_btn.set_group(Some(&region_btn));
     both_btn.set_group(Some(&region_btn));
     region_btn.set_hexpand(true);
     full_btn.set_hexpand(true);
     both_btn.set_hexpand(true);
+    region_btn.set_tooltip_text(Some("Select a region with slurp (one head only)."));
+    full_btn.set_tooltip_text(Some(
+        "Capture one full monitor. List is live from hyprctl / wf-recorder — not hardcoded.",
+    ));
     mode_row.append(&region_btn);
     mode_row.append(&full_btn);
     mode_row.append(&both_btn);
@@ -886,7 +891,7 @@ fn build_window(
             let one = full_btn.is_active();
             let both = both_mode;
             if !region && !one && !both {
-                msg_label.set_text("Select Region, One monitor, or Both");
+                msg_label.set_text("Select Region, One monitor, or 2 monitors");
                 return;
             }
             if both {
@@ -942,7 +947,7 @@ fn build_window(
                         }
                     } else if both {
                         // Neutral copy: inventory list order ≠ server primary (min x,y).
-                        msg_label.set_text("Starting… Both");
+                        msg_label.set_text("Starting… 2 monitors");
                     } else {
                         let name = picker
                             .borrow()
@@ -1320,15 +1325,15 @@ fn format_op_message(kind: OpKind, resp: &IpcResponse) -> String {
     }
 }
 
-/// Status line for active capture: `Output: NAME` (One) or `Both: A + B` (Both).
+/// Status line for active capture: `Output: NAME` (One) or `2 monitors: A + B`.
 ///
-/// `capture_output` for Both is stored as `A+B` (server); pretty-print with spaces.
+/// `capture_output` for dual mode is stored as `A+B` (server); pretty-print with spaces.
 /// Mode branch is the product contract (`both` vs other); `+` is cosmetic only.
 fn format_capture_message(status: &IpcStatus) -> Option<String> {
     let o = status.capture_output.as_ref()?;
     if status.capture_mode.as_deref() == Some("both") {
         let pretty = o.replace('+', " + ");
-        Some(format!("Both: {pretty}"))
+        Some(format!("2 monitors: {pretty}"))
     } else {
         // Region normally has no capture_output; if present, still show Output: …
         Some(format!("Output: {o}"))
@@ -1741,23 +1746,30 @@ impl BothEnablement {
 
     fn tooltip(self) -> &'static str {
         match self {
-            BothEnablement::Enabled => "Record both monitors into one layout-true file",
+            BothEnablement::Enabled => {
+                "Both screens → one video (Hyprland layout, black voids). Exactly 2 monitors only for now."
+            }
             BothEnablement::Disabled { reason } => reason,
         }
     }
 }
 
-/// Both enabled iff exactly **2** monitors in inventory **and** `ffmpeg` on PATH.
+/// Dual-monitor mode enabled iff exactly **2** live outputs **and** `ffmpeg` on PATH.
 ///
+/// Inventory is **live** (`hyprctl monitors -j` / `wf-recorder -L`) — never hardcoded names.
 /// Check order (when disabled): ≠2 monitors first, then missing ffmpeg.
 fn both_enablement(inventory_len: usize, ffmpeg_present: bool) -> BothEnablement {
-    if inventory_len != 2 {
+    if inventory_len < 2 {
         BothEnablement::Disabled {
-            reason: "Both requires exactly two monitors.",
+            reason: "2-monitor mode needs exactly two monitors (fewer detected).",
+        }
+    } else if inventory_len > 2 {
+        BothEnablement::Disabled {
+            reason: "Only exactly two monitors supported for now (3+ not supported yet).",
         }
     } else if !ffmpeg_present {
         BothEnablement::Disabled {
-            reason: "Both requires ffmpeg.",
+            reason: "2-monitor mode needs ffmpeg on PATH (post-stop stitch).",
         }
     } else {
         BothEnablement::Enabled
@@ -2029,19 +2041,21 @@ mod picker_tests {
 
     #[test]
     fn both_enablement_matrix_all_cells() {
-        const MON: &str = "Both requires exactly two monitors.";
-        const FF: &str = "Both requires ffmpeg.";
-        const OK: &str = "Record both monitors into one layout-true file";
+        const FEW: &str = "2-monitor mode needs exactly two monitors (fewer detected).";
+        const MANY: &str = "Only exactly two monitors supported for now (3+ not supported yet).";
+        const FF: &str = "2-monitor mode needs ffmpeg on PATH (post-stop stitch).";
+        const OK: &str =
+            "Both screens → one video (Hyprland layout, black voids). Exactly 2 monitors only for now.";
         // Every cell of {0,1,2,3} × {ffmpeg T/F}.
         let cases: &[(usize, bool, bool, &str)] = &[
-            (0, false, false, MON),
-            (0, true, false, MON),
-            (1, false, false, MON),
-            (1, true, false, MON),
+            (0, false, false, FEW),
+            (0, true, false, FEW),
+            (1, false, false, FEW),
+            (1, true, false, FEW),
             (2, false, false, FF),
             (2, true, true, OK),
-            (3, false, false, MON),
-            (3, true, false, MON),
+            (3, false, false, MANY),
+            (3, true, false, MANY),
         ];
         for &(n, ff, want_en, want_tip) in cases {
             let g = both_enablement(n, ff);
@@ -2121,21 +2135,21 @@ mod picker_tests {
         );
         assert_eq!(format_stopping_message(&one, false), "Stopping…");
 
-        // Both happy A+B pretty-print
+        // Dual happy A+B pretty-print
         let both = ipc_status("Recording", Some("both"), Some("HDMI-A-1+DP-1"));
         assert_eq!(
             format_capture_message(&both).as_deref(),
-            Some("Both: HDMI-A-1 + DP-1")
+            Some("2 monitors: HDMI-A-1 + DP-1")
         );
         assert_eq!(
             format_stopping_message(&both, false),
             "Stopping… Composing…"
         );
-        // Mode branch is the contract — no '+' still Both:
+        // Mode branch is the contract — no '+' still dual:
         let both_one_name = ipc_status("Recording", Some("both"), Some("HDMI-A-1"));
         assert_eq!(
             format_capture_message(&both_one_name).as_deref(),
-            Some("Both: HDMI-A-1")
+            Some("2 monitors: HDMI-A-1")
         );
 
         // Region: no capture_output → no capture label; stop is plain Stopping…
@@ -2152,13 +2166,13 @@ mod picker_tests {
     #[test]
     fn status_message_line_branch_order() {
         let both_rec = ipc_status("Recording", Some("both"), Some("HDMI-A-1+DP-1"));
-        // (c) Recording + both → Both: A + B
+        // (c) Recording + both → 2 monitors: A + B
         assert_eq!(
             status_message_line(None, &both_rec, false, false).as_deref(),
-            Some("Both: HDMI-A-1 + DP-1")
+            Some("2 monitors: HDMI-A-1 + DP-1")
         );
 
-        // (a) stop_in_flight + both + capture_output → Composing, not Both label
+        // (a) stop_in_flight + both + capture_output → Composing, not dual label
         assert_eq!(
             status_message_line(None, &both_rec, true, true).as_deref(),
             Some("Stopping… Composing…")
