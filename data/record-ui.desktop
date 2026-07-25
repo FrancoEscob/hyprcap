@@ -2,11 +2,11 @@
 Type=Application
 Name=record-ui
 GenericName=Screen Recorder
-Comment=Region/fullscreen screen recorder for Hyprland (wf-recorder frontend)
+Comment=Region, one-monitor, or dual-monitor recorder for Hyprland (wf-recorder)
 Exec=record-ui gui
 Icon=media-record
 Terminal=false
-Categories=AudioVideo;Video;Recorder;
-Keywords=record;screen;wf-recorder;hyprland;wayland;region;
+Categories=AudioVideo;Video;Recorder;GTK;
+Keywords=record;screen;wf-recorder;hyprland;wayland;region;monitor;dual;
 StartupNotify=true
 StartupWMClass=dev.recordui.app

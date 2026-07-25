@@ -1,62 +1,65 @@
 # record-ui
 
-Native frontend for [`wf-recorder`](https://github.com/ammen99/wf-recorder) on **Hyprland / wlroots**.
+Native GTK4 / libadwaita frontend for [`wf-recorder`](https://github.com/ammen99/wf-recorder) on **Hyprland / wlroots**.
 
-- **Daemon-on-demand** session server owns an exclusive recording session (region/one = one `wf-recorder` child; **Both** = two children + post-stop `ffmpeg` layout-true stitch)
-- **CLI** for keybinds (`toggle-region`, `stop`, `status`, `both`, …) — never initializes GTK
-- **Optional GTK4 + libadwaita** GUI as a view on the same session
-- Clipboard gets the **absolute file path** (text), not video bytes
+- **Region** · **One monitor** · **2 monitors** (exactly two heads → one layout-true file after stop)
+- Daemon-on-demand session (CLI + GUI share the same recording)
+- Clipboard gets the **file path** (text), not video bytes
 
-See [SPEC.md](SPEC.md) for the full product/architecture contract.
+Deep design: [SPEC.md](SPEC.md) · dual-monitor: [docs/DUAL-MONITOR.md](docs/DUAL-MONITOR.md)
 
 ---
 
-## Install / build
+## Install (Arch)
 
-### Runtime package deps (distro)
+### AUR (recommended for users)
 
-Hard (required to record):
-
-| Binary | Used for |
-|--------|----------|
-| `wf-recorder` | Capture / encode |
-| `slurp` | Region selection |
-| `ffmpeg` | **Both** compose only (layout-true stitch after stop); not required for region/one |
-
-Soft (features degrade if missing):
-
-| Binary | Used for |
-|--------|----------|
-| `notify-send` | Desktop notifications (`libnotify`) |
-| `wl-copy` | Copy output path (`wl-clipboard`) |
-| `xdg-open` | Open last file / folder from GUI |
-| `hyprctl` | Rich output inventory / layout positions (hard for **Both** start; soft fallback names-only for One) |
-
-Build-time (for GUI path): `gtk4`, `libadwaita`, `pkg-config` / `pkgconf`, and a C toolchain (`base-devel` or equivalent).
-
-### From source
+When published to the AUR:
 
 ```bash
-# Install into ~/.cargo/bin (ensure it is on PATH)
-cargo install --path .
-
-# Or build a release binary only
-cargo build --release
-# → target/release/record-ui
+yay -S record-ui-git
+# or: paru -S record-ui-git
 ```
 
-Install the launcher entry (optional, for walker / app menus):
+That installs:
+
+| Path | Purpose |
+|------|---------|
+| `/usr/bin/record-ui` | binary (on `PATH`) |
+| `/usr/share/applications/record-ui.desktop` | launcher for **walker** / app menus |
+
+No hand-copied `.desktop`, no `~/.cargo/bin` hacks. Open walker → type `record-ui`.
+
+Until the AUR package is online, build the same package **from this repo**:
 
 ```bash
-# System-wide
-sudo install -Dm644 data/record-ui.desktop /usr/share/applications/record-ui.desktop
+cd packaging/aur/record-ui-git
+makepkg -si
+```
 
-# Or user-local
+Details for maintainers: [packaging/aur/README.md](packaging/aur/README.md).
+
+### From source (any distro)
+
+```bash
+# build deps: rust, cargo, pkgconf, gtk4, libadwaita
+cargo install --path . --locked
+# → ~/.cargo/bin/record-ui  (put ~/.cargo/bin on PATH)
+
+# optional: show in walker without AUR
 install -Dm644 data/record-ui.desktop \
-  "${XDG_DATA_HOME:-$HOME/.local/share}/applications/record-ui.desktop"
+  ~/.local/share/applications/record-ui.desktop
 ```
 
-`Exec=record-ui gui` (same as bare `record-ui`) assumes the binary is on the launcher’s `PATH`. Use an absolute path in the `.desktop` file if needed.
+### Runtime deps
+
+| Need | Packages / binaries |
+|------|---------------------|
+| Record | `wf-recorder`, `slurp` |
+| 2-monitor stitch | `ffmpeg` |
+| GUI | `gtk4`, `libadwaita` |
+| Multi-monitor layout (Hyprland) | `hyprctl` (usually with Hyprland) |
+| Nice-to-have | `notify-send`, `wl-copy`, `xdg-open` |
 
 ---
 
