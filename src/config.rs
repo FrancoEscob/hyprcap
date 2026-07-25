@@ -31,6 +31,11 @@ pub struct Config {
     /// Empty/None: sole output if inventory length is 1; else start fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fullscreen_output: Option<String>,
+    /// One-monitor FPS for `wf-recorder -r`. Absent/`None` = Auto (omit `-r`)
+    /// when CLI/IPC does not pass an explicit fps for this start.
+    /// CLI/IPC `--fps` / `fps` overrides this for a single start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub one_fps: Option<u32>,
 }
 
 impl Default for Config {
@@ -50,6 +55,7 @@ impl Default for Config {
             stop_timeout_ms: 5000,
             stop_term_timeout_ms: 2000,
             fullscreen_output: None,
+            one_fps: None,
         }
     }
 }
@@ -86,6 +92,7 @@ impl Config {
             stop_timeout_ms: 5000,
             stop_term_timeout_ms: 2000,
             fullscreen_output: None,
+            one_fps: None,
         }
     }
 
@@ -95,6 +102,11 @@ impl Config {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
+    }
+
+    /// Configured one-monitor FPS, if set (Auto when `None`).
+    pub fn one_fps_override(&self) -> Option<u32> {
+        self.one_fps
     }
 
     /// Load TOML from `path`. Missing file → defaults. Partial TOML merges over defaults.
@@ -155,6 +167,7 @@ struct PartialConfig {
     stop_timeout_ms: Option<u64>,
     stop_term_timeout_ms: Option<u64>,
     fullscreen_output: Option<String>,
+    one_fps: Option<u32>,
 }
 
 impl PartialConfig {
@@ -183,6 +196,9 @@ impl PartialConfig {
         if let Some(v) = self.fullscreen_output {
             base.fullscreen_output = Some(v);
         }
+        if let Some(v) = self.one_fps {
+            base.one_fps = Some(v);
+        }
         base
     }
 }
@@ -203,6 +219,8 @@ mod tests {
         assert!(cfg.notify_on_start_cli);
         assert_eq!(cfg.stop_timeout_ms, 5000);
         assert_eq!(cfg.stop_term_timeout_ms, 2000);
+        assert!(cfg.fullscreen_output.is_none());
+        assert!(cfg.one_fps.is_none());
     }
 
     #[test]
@@ -216,6 +234,8 @@ notify = false
 notify_on_start_cli = false
 stop_timeout_ms = 1000
 stop_term_timeout_ms = 500
+fullscreen_output = "HDMI-A-1"
+one_fps = 144
 "#;
         let cfg = Config::parse_toml(toml, defaults).unwrap();
         assert_eq!(cfg.output_dir, PathBuf::from("/tmp/clips"));
@@ -225,6 +245,9 @@ stop_term_timeout_ms = 500
         assert!(!cfg.notify_on_start_cli);
         assert_eq!(cfg.stop_timeout_ms, 1000);
         assert_eq!(cfg.stop_term_timeout_ms, 500);
+        assert_eq!(cfg.fullscreen_output.as_deref(), Some("HDMI-A-1"));
+        assert_eq!(cfg.one_fps, Some(144));
+        assert_eq!(cfg.one_fps_override(), Some(144));
     }
 
     #[test]
@@ -234,6 +257,7 @@ stop_term_timeout_ms = 500
         assert!(cfg.audio_default);
         assert_eq!(cfg.output_dir, defaults.output_dir);
         assert_eq!(cfg.stop_timeout_ms, 5000);
+        assert!(cfg.one_fps.is_none());
     }
 
     #[test]

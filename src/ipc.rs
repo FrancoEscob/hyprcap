@@ -37,6 +37,11 @@ pub struct IpcRequest {
     /// Optional Wayland output for `StartFullscreen` (`wf-recorder -o`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// Optional FPS for `StartFullscreen` (`wf-recorder -r`).
+    /// Omit / null = use config `one_fps` if set, else Auto (no `-r`).
+    /// Explicit number overrides config for this start (`0` treated as Auto).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
 }
 
 impl IpcRequest {
@@ -46,6 +51,7 @@ impl IpcRequest {
             audio: None,
             gui: None,
             output: None,
+            fps: None,
         }
     }
 
@@ -55,6 +61,7 @@ impl IpcRequest {
             audio: None,
             gui: None,
             output: None,
+            fps: None,
         }
     }
 
@@ -64,15 +71,17 @@ impl IpcRequest {
             audio,
             gui: None,
             output: None,
+            fps: None,
         }
     }
 
-    pub fn start_fullscreen(audio: Option<bool>, output: Option<String>) -> Self {
+    pub fn start_fullscreen(audio: Option<bool>, output: Option<String>, fps: Option<u32>) -> Self {
         Self {
             cmd: IpcCommand::StartFullscreen,
             audio,
             gui: None,
             output,
+            fps,
         }
     }
 
@@ -82,6 +91,7 @@ impl IpcRequest {
             audio: None,
             gui: None,
             output: None,
+            fps: None,
         }
     }
 
@@ -91,6 +101,7 @@ impl IpcRequest {
             audio,
             gui: None,
             output: None,
+            fps: None,
         }
     }
 
@@ -100,6 +111,7 @@ impl IpcRequest {
             audio: None,
             gui: None,
             output: None,
+            fps: None,
         }
     }
 
@@ -110,6 +122,7 @@ impl IpcRequest {
             audio: None,
             gui: Some(true),
             output: None,
+            fps: None,
         }
     }
 }
@@ -246,6 +259,26 @@ mod tests {
         let back = decode_request(&line).unwrap();
         assert_eq!(back.cmd, IpcCommand::StartRegion);
         assert_eq!(back.audio, Some(true));
+    }
+
+    #[test]
+    fn roundtrip_start_fullscreen_output_fps() {
+        let req = IpcRequest::start_fullscreen(Some(true), Some("DP-1".into()), Some(60));
+        let line = encode_request(&req).unwrap();
+        let back = decode_request(&line).unwrap();
+        assert_eq!(back.cmd, IpcCommand::StartFullscreen);
+        assert_eq!(back.audio, Some(true));
+        assert_eq!(back.output.as_deref(), Some("DP-1"));
+        assert_eq!(back.fps, Some(60));
+        // Omitted fps deserializes as None (config one_fps or Auto).
+        let bare = decode_request(r#"{"cmd":"start_fullscreen","output":"eDP-1"}"#).unwrap();
+        assert_eq!(bare.fps, None);
+        assert_eq!(bare.output.as_deref(), Some("eDP-1"));
+        // Explicit JSON null also means unset (SPEC §8.2 number or null).
+        let null_fps =
+            decode_request(r#"{"cmd":"start_fullscreen","fps":null,"output":"DP-1"}"#).unwrap();
+        assert_eq!(null_fps.fps, None);
+        assert_eq!(null_fps.output.as_deref(), Some("DP-1"));
     }
 
     #[test]

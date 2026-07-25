@@ -346,7 +346,7 @@ where
         IpcCommand::Status => (CommandResult::ok_msg("status"), false),
         IpcCommand::StartRegion => (recorder.start_region(req.audio, notify_start), false),
         IpcCommand::StartFullscreen => (
-            recorder.start_fullscreen(req.audio, notify_start, req.output.as_deref()),
+            recorder.start_fullscreen(req.audio, notify_start, req.output.as_deref(), req.fps),
             false,
         ),
         IpcCommand::Stop => (recorder.stop(), false),
@@ -776,10 +776,12 @@ where
             })
         }
         IpcCommand::StartFullscreen => {
-            let result =
-                state
-                    .recorder
-                    .start_fullscreen(req.audio, notify_start, req.output.as_deref());
+            let result = state.recorder.start_fullscreen(
+                req.audio,
+                notify_start,
+                req.output.as_deref(),
+                req.fps,
+            );
             let o = outcome_from_result(result, &state.recorder);
             write_response(writer, &o.response)?;
             Ok(ConnAction::Done {
@@ -1207,6 +1209,7 @@ mod tests {
             stop_term_timeout_ms: 50,
             // Fixed name so unit tests never call hyprctl / real outputs.
             fullscreen_output: Some("TEST-OUT".into()),
+            one_fps: None,
         }
     }
 

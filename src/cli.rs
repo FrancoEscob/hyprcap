@@ -35,6 +35,11 @@ pub enum Command {
         /// and `fullscreen_output` is unset in config.
         #[arg(long)]
         output: Option<String>,
+        /// Capture frame rate (`wf-recorder -r`). Omitted = use config `one_fps`
+        /// if set, else Auto (no `-r`). Explicit `--fps N` overrides config for
+        /// this start (`N > 0`; `0` is treated as Auto).
+        #[arg(long)]
+        fps: Option<u32>,
     },
     /// Toggle region: Idle→start, SelectingRegion→cancel, Recording→stop.
     ToggleRegion {
@@ -106,9 +111,9 @@ fn dispatch(cmd: Command) -> Result<i32, String> {
             print_message(&resp);
             Ok(exit_from(&resp))
         }
-        Command::Fullscreen { audio, output } => {
+        Command::Fullscreen { audio, output, fps } => {
             let audio = if audio { Some(true) } else { None };
-            let resp = ensure_and_request(&IpcRequest::start_fullscreen(audio, output))?;
+            let resp = ensure_and_request(&IpcRequest::start_fullscreen(audio, output, fps))?;
             print_message(&resp);
             Ok(exit_from(&resp))
         }

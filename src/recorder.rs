@@ -446,11 +446,13 @@ where
     /// Fullscreen / one-monitor start: always `wf-recorder -o NAME` (no `-g`).
     ///
     /// `output_override`: CLI/IPC `--output` / `output` (wins over config pin).
+    /// `fps_override`: CLI/IPC `--fps` / `fps` (wins over config `one_fps`; `None` = Auto).
     pub fn start_fullscreen(
         &mut self,
         audio: Option<bool>,
         notify_start: bool,
         output_override: Option<&str>,
+        fps_override: Option<u32>,
     ) -> CommandResult {
         if self.state != State::Idle {
             return CommandResult::err(
@@ -475,11 +477,12 @@ where
                 return CommandResult::err(MachineCode::Invalid, e);
             }
         };
+        let fps = resolve_one_fps(fps_override, self.config.one_fps_override());
         let audio = audio.unwrap_or(self.config.audio_default);
         self.notify_start = notify_start;
         self.last_error = None;
         self.capture_output = Some(name.clone());
-        self.spawn_recorder(None, audio, Some(name))
+        self.spawn_recorder(None, audio, Some(name), fps)
     }
 
     /// Stop if selecting or recording; idle no-op success; Stopping is idempotent.
@@ -538,7 +541,7 @@ where
             };
         }
         self.capture_output = None;
-        self.spawn_recorder(Some(geom), self.pending_audio, None)
+        self.spawn_recorder(Some(geom), self.pending_audio, None, None)
     }
 
     fn spawn_recorder(
@@ -546,6 +549,7 @@ where
         geometry: Option<String>,
         audio: bool,
         fullscreen_output: Option<String>,
+        fps: Option<u32>,
     ) -> CommandResult {
         self.state = State::Starting;
         self.audio = audio;
@@ -592,6 +596,7 @@ where
             audio,
             &path,
             fullscreen_output.as_deref(),
+            fps,
         );
         let opts = SpawnOpts {
             new_process_group: true,
@@ -992,6 +997,7 @@ where
 /// Pure fullscreen output resolution (inject inventory; no hyprctl in tests).
 ///
 /// Chain: request override → config pin → sole inventory name → Err.
+/// Never uses focused-output-after-click (DUAL-MONITOR §6.1).
 pub fn resolve_fullscreen_output(
     override_name: Option<&str>,
     config_pin: Option<&str>,
@@ -1036,6 +1042,13 @@ pub fn resolve_fullscreen_output(
     }
 }
 
+/// One-monitor FPS: CLI/IPC override → config `one_fps` → Auto (`None`, no `-r`).
+///
+/// Values of `0` are treated as Auto (never emit `wf-recorder -r 0`).
+pub fn resolve_one_fps(override_fps: Option<u32>, config_fps: Option<u32>) -> Option<u32> {
+    override_fps.or(config_fps).filter(|&n| n > 0)
+}
+
 fn format_known_outputs(inventory: &[String]) -> String {
     if inventory.is_empty() {
         "(none)".to_string()
@@ -1048,21 +1061,37 @@ fn format_known_outputs(inventory: &[String]) -> String {
 ///
 /// `output`: Wayland output name for fullscreen (`-o`). Ignored when `geometry`
 /// is set (region already pins the capture area).
+/// `fps`: One-monitor only — when `geometry` is `None` and `fps` is `Some(n)` with
+/// `n > 0`, emit `-r n`. Region (`geometry` set) always omits `-r` even if `fps`
+/// is `Some` (defensive; production region path passes `None`).
 ///
 /// Fullscreen production paths must pass a non-empty `output` so `-o` is always present.
+/// Order (DUAL-MONITOR §6.3): `wf-recorder -o NAME [-r FPS] [-a] -f path`.
 pub fn build_wf_recorder_argv(
     geometry: Option<&str>,
     audio: bool,
     path: &Path,
     output: Option<&str>,
+    fps: Option<u32>,
 ) -> Vec<String> {
     let mut argv = vec!["wf-recorder".to_string()];
-    if let Some(g) = geometry {
+    let region = if let Some(g) = geometry {
         argv.push("-g".into());
         argv.push(g.to_string());
-    } else if let Some(o) = output.map(str::trim).filter(|s| !s.is_empty()) {
-        argv.push("-o".into());
-        argv.push(o.to_string());
+        true
+    } else {
+        if let Some(o) = output.map(str::trim).filter(|s| !s.is_empty()) {
+            argv.push("-o".into());
+            argv.push(o.to_string());
+        }
+        false
+    };
+    // FPS is One-monitor only; never combine `-g` and `-r`.
+    if !region {
+        if let Some(r) = fps.filter(|&n| n > 0) {
+            argv.push("-r".into());
+            argv.push(r.to_string());
+        }
     }
     if audio {
         argv.push("-a".into());
@@ -1562,6 +1591,7 @@ mod tests {
                 stop_term_timeout_ms: 50,
                 // Avoid calling real hyprctl from unit tests.
                 fullscreen_output: Some("TEST-OUT".into()),
+                one_fps: None,
             }
         }
     }
@@ -1722,7 +1752,7 @@ mod tests {
         let spawner = FakeSpawner::new();
         let mut rec = make_recorder(&paths, spawner);
 
-        let r = rec.start_fullscreen(None, true, None);
+        let r = rec.start_fullscreen(None, true, None, None);
         assert!(r.ok, "{r:?}");
         assert_eq!(rec.state(), State::Recording);
         assert!(r.message.contains("TEST-OUT"), "{r:?}");
@@ -2073,7 +2103,7 @@ mod tests {
         spawner.missing.push("wf-recorder".into());
         let mut rec = make_recorder(&paths, spawner);
 
-        let r = rec.start_fullscreen(None, true, None);
+        let r = rec.start_fullscreen(None, true, None, None);
         assert!(!r.ok);
         assert_eq!(r.code, MachineCode::DepMissing);
         assert_eq!(r.code.exit_code(), 4);
@@ -2168,7 +2198,7 @@ mod tests {
         let paths = TempPaths::new();
         let spawner = FakeSpawner::new();
         let mut rec = make_recorder(&paths, spawner);
-        rec.start_fullscreen(None, false, None);
+        rec.start_fullscreen(None, false, None, None);
         assert!(!rec
             .notifier()
             .calls
@@ -2212,7 +2242,7 @@ mod tests {
             ..Default::default()
         });
         let mut rec = make_recorder(&paths, spawner);
-        let r = rec.start_fullscreen(None, true, None);
+        let r = rec.start_fullscreen(None, true, None, None);
         assert!(r.ok, "{r:?}");
         assert_eq!(rec.state(), State::Recording);
         let r = rec.poll().expect("dead child");
@@ -2243,18 +2273,46 @@ mod tests {
     #[test]
     fn build_argv_helpers() {
         let p = Path::new("/tmp/rec.mp4");
-        let a = build_wf_recorder_argv(Some("0,0 10x10"), true, p, Some("HDMI-A-1"));
+        let a = build_wf_recorder_argv(Some("0,0 10x10"), true, p, Some("HDMI-A-1"), None);
         assert_eq!(
             a,
             vec!["wf-recorder", "-g", "0,0 10x10", "-a", "-f", "/tmp/rec.mp4"]
         );
-        let b = build_wf_recorder_argv(None, false, p, None);
+        let b = build_wf_recorder_argv(None, false, p, None, None);
         assert_eq!(b, vec!["wf-recorder", "-f", "/tmp/rec.mp4"]);
-        let c = build_wf_recorder_argv(None, true, p, Some("DP-1"));
+        let c = build_wf_recorder_argv(None, true, p, Some("DP-1"), None);
         assert_eq!(
             c,
             vec!["wf-recorder", "-o", "DP-1", "-a", "-f", "/tmp/rec.mp4"]
         );
+        // Fullscreen with FPS: `-o NAME -r N [-a] -f path` (no `-g`).
+        let d = build_wf_recorder_argv(None, true, p, Some("HDMI-A-1"), Some(144));
+        assert_eq!(
+            d,
+            vec![
+                "wf-recorder",
+                "-o",
+                "HDMI-A-1",
+                "-r",
+                "144",
+                "-a",
+                "-f",
+                "/tmp/rec.mp4"
+            ]
+        );
+        // Auto FPS: omit `-r`.
+        let e = build_wf_recorder_argv(None, false, p, Some("eDP-1"), None);
+        assert_eq!(e, vec!["wf-recorder", "-o", "eDP-1", "-f", "/tmp/rec.mp4"]);
+        // Region ignores fps even if Some (no `-g`+`-r`).
+        let f = build_wf_recorder_argv(Some("0,0 10x10"), false, p, None, Some(60));
+        assert_eq!(
+            f,
+            vec!["wf-recorder", "-g", "0,0 10x10", "-f", "/tmp/rec.mp4"]
+        );
+        assert!(!f.iter().any(|a| a == "-r"));
+        // Zero FPS never emits `-r`.
+        let g = build_wf_recorder_argv(None, false, p, Some("eDP-1"), Some(0));
+        assert!(!g.iter().any(|a| a == "-r"), "argv={g:?}");
     }
 
     #[test]
@@ -2266,7 +2324,7 @@ mod tests {
         let mut cfg = rec.config().clone();
         cfg.fullscreen_output = Some("OTHER-OUT".into());
         rec.set_config(cfg);
-        assert!(rec.start_fullscreen(None, false, None).ok);
+        assert!(rec.start_fullscreen(None, false, None, None).ok);
         let argv = rec.spawner().wf_spawns()[0].argv.clone();
         assert!(
             argv.windows(2).any(|w| w[0] == "-o" && w[1] == "OTHER-OUT"),
@@ -2284,7 +2342,7 @@ mod tests {
         let mut cfg = rec.config().clone();
         cfg.fullscreen_output = Some("DP-1".into());
         rec.set_config(cfg);
-        assert!(rec.start_fullscreen(None, false, Some("HDMI-A-1")).ok);
+        assert!(rec.start_fullscreen(None, false, Some("HDMI-A-1"), None).ok);
         let argv = &rec.spawner().wf_spawns()[0].argv;
         assert!(
             argv.windows(2).any(|w| w[0] == "-o" && w[1] == "HDMI-A-1"),
@@ -2301,7 +2359,7 @@ mod tests {
         let mut cfg = rec.config().clone();
         cfg.fullscreen_output = None;
         rec.set_config(cfg);
-        let r = rec.start_fullscreen(None, false, None);
+        let r = rec.start_fullscreen(None, false, None, None);
         assert!(!r.ok, "{r:?}");
         assert_eq!(r.code, MachineCode::Invalid);
         assert!(
@@ -2320,7 +2378,7 @@ mod tests {
         let mut cfg = rec.config().clone();
         cfg.fullscreen_output = None;
         rec.set_config(cfg);
-        let r = rec.start_fullscreen(None, false, None);
+        let r = rec.start_fullscreen(None, false, None, None);
         assert!(!r.ok, "{r:?}");
         assert_eq!(r.code, MachineCode::Invalid);
         assert!(rec.spawner().wf_spawns().is_empty());
@@ -2332,7 +2390,7 @@ mod tests {
         let spawner = FakeSpawner::new();
         let mut rec = make_recorder(&paths, spawner);
         rec.set_forced_output_inventory(Some(vec!["DP-1".into()]));
-        let r = rec.start_fullscreen(None, false, Some("NOPE"));
+        let r = rec.start_fullscreen(None, false, Some("NOPE"), None);
         assert!(!r.ok, "{r:?}");
         assert_eq!(r.code, MachineCode::Invalid);
         assert!(r.message.contains("DP-1"), "{r:?}");
@@ -2348,7 +2406,7 @@ mod tests {
         let mut cfg = rec.config().clone();
         cfg.fullscreen_output = None;
         rec.set_config(cfg);
-        let r = rec.start_fullscreen(None, true, None);
+        let r = rec.start_fullscreen(None, true, None, None);
         assert!(r.ok, "{r:?}");
         assert!(r.message.contains("eDP-1"), "{r:?}");
         assert!(
@@ -2374,13 +2432,116 @@ mod tests {
             resolve_fullscreen_output(None, Some("A"), &inv).unwrap(),
             "A"
         );
-        assert!(resolve_fullscreen_output(None, None, &inv).is_err());
+        // Multi-head without pin/CLI → Err listing known names.
+        let multi_err = resolve_fullscreen_output(None, None, &inv).unwrap_err();
+        assert!(
+            multi_err.contains("A") && multi_err.contains("B"),
+            "{multi_err}"
+        );
         assert_eq!(
             resolve_fullscreen_output(None, None, &["Solo".into()]).unwrap(),
             "Solo"
         );
         assert!(resolve_fullscreen_output(None, None, &[]).is_err());
-        assert!(resolve_fullscreen_output(Some("Z"), None, &inv).is_err());
+        // Explicit name not in inventory → Err (no silent fallback).
+        let unknown = resolve_fullscreen_output(Some("Z"), None, &inv).unwrap_err();
+        assert!(unknown.contains("Z") && unknown.contains("A"), "{unknown}");
+        // Config pin not in inventory → Err.
+        assert!(resolve_fullscreen_output(None, Some("Z"), &inv).is_err());
+    }
+
+    #[test]
+    fn resolve_one_fps_priority() {
+        assert_eq!(resolve_one_fps(Some(30), Some(144)), Some(30));
+        assert_eq!(resolve_one_fps(None, Some(144)), Some(144));
+        assert_eq!(resolve_one_fps(None, None), None);
+        assert_eq!(resolve_one_fps(Some(60), None), Some(60));
+        // 0 is Auto (never -r 0).
+        assert_eq!(resolve_one_fps(Some(0), Some(144)), None);
+        assert_eq!(resolve_one_fps(None, Some(0)), None);
+    }
+
+    #[test]
+    fn region_spawn_ignores_config_one_fps() {
+        let paths = TempPaths::new();
+        let mut spawner = FakeSpawner::new();
+        spawner.push_script(slurp_ok("10,20 300x200"));
+        let mut rec = make_recorder(&paths, spawner);
+        let mut cfg = rec.config().clone();
+        cfg.one_fps = Some(144);
+        rec.set_config(cfg);
+        let r = rec.start_region(None, false);
+        assert!(r.ok, "{r:?}");
+        assert_eq!(rec.state(), State::Recording);
+        let argv = &rec.spawner().wf_spawns()[0].argv;
+        assert!(argv.contains(&"-g".into()), "argv={argv:?}");
+        assert!(
+            !argv.iter().any(|a| a == "-r"),
+            "region must not inherit one_fps: argv={argv:?}"
+        );
+        let _ = rec.stop();
+    }
+
+    #[test]
+    fn fullscreen_argv_uses_config_one_fps() {
+        let paths = TempPaths::new();
+        let spawner = FakeSpawner::new();
+        let mut rec = make_recorder(&paths, spawner);
+        rec.set_forced_output_inventory(Some(vec!["eDP-1".into()]));
+        let mut cfg = rec.config().clone();
+        cfg.fullscreen_output = None;
+        cfg.one_fps = Some(144);
+        rec.set_config(cfg);
+        assert!(rec.start_fullscreen(None, false, None, None).ok);
+        let argv = &rec.spawner().wf_spawns()[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w[0] == "-o" && w[1] == "eDP-1"),
+            "argv={argv:?}"
+        );
+        assert!(
+            argv.windows(2).any(|w| w[0] == "-r" && w[1] == "144"),
+            "argv={argv:?}"
+        );
+        let _ = rec.stop();
+    }
+
+    #[test]
+    fn fullscreen_cli_fps_beats_config_one_fps() {
+        let paths = TempPaths::new();
+        let spawner = FakeSpawner::new();
+        let mut rec = make_recorder(&paths, spawner);
+        rec.set_forced_output_inventory(Some(vec!["eDP-1".into()]));
+        let mut cfg = rec.config().clone();
+        cfg.fullscreen_output = None;
+        cfg.one_fps = Some(144);
+        rec.set_config(cfg);
+        assert!(rec.start_fullscreen(None, false, None, Some(60)).ok);
+        let argv = &rec.spawner().wf_spawns()[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w[0] == "-r" && w[1] == "60"),
+            "argv={argv:?}"
+        );
+        assert!(
+            !argv.windows(2).any(|w| w[0] == "-r" && w[1] == "144"),
+            "argv={argv:?}"
+        );
+        let _ = rec.stop();
+    }
+
+    #[test]
+    fn fullscreen_auto_fps_omits_r() {
+        let paths = TempPaths::new();
+        let spawner = FakeSpawner::new();
+        let mut rec = make_recorder(&paths, spawner);
+        rec.set_forced_output_inventory(Some(vec!["eDP-1".into()]));
+        let mut cfg = rec.config().clone();
+        cfg.fullscreen_output = None;
+        cfg.one_fps = None;
+        rec.set_config(cfg);
+        assert!(rec.start_fullscreen(None, false, None, None).ok);
+        let argv = &rec.spawner().wf_spawns()[0].argv;
+        assert!(!argv.iter().any(|a| a == "-r"), "argv={argv:?}");
+        let _ = rec.stop();
     }
 
     #[test]
@@ -2398,7 +2559,7 @@ mod tests {
         // Do not auto-override already_dead for wf-recorder — keep script as-is.
         spawner.auto_write_on_signal = false;
         let mut rec = make_recorder(&paths, spawner);
-        let r = rec.start_fullscreen(None, false, None);
+        let r = rec.start_fullscreen(None, false, None, None);
         assert!(!r.ok, "{r:?}");
         assert!(
             r.message.contains("Failed to select output") || r.message.contains("missing or empty"),
