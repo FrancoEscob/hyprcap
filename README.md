@@ -1,12 +1,20 @@
 # record-ui
 
-Small screen recorder for **Hyprland** (wrapper around [`wf-recorder`](https://github.com/ammen99/wf-recorder)).
+Small **pure Rust** screen recorder for **Hyprland** — a GTK4 / libadwaita UI around [`wf-recorder`](https://github.com/ammen99/wf-recorder).
 
-- **Region** — pick a rectangle  
-- **One monitor** — full head + FPS  
-- **2 monitors** — both screens into **one** video (exactly 2 displays; layout matches Hyprland)
+| Mode | What it does |
+|------|----------------|
+| **Region** | Draw a rectangle, record that |
+| **One monitor** | Full display + FPS picker |
+| **2 monitors** | Both screens → **one** video (exactly 2 displays; layout matches Hyprland) |
 
-GTK4 GUI + CLI for keybinds. Files go to your Videos folder; the path is copied to the clipboard.
+CLI for keybinds. Files land in Videos; path is copied to the clipboard.
+
+<p align="center">
+  <img src="docs/screenshots/region.png" alt="record-ui — Region mode" width="320" />
+  &nbsp;
+  <img src="docs/screenshots/one-monitor.png" alt="record-ui — One monitor mode" width="320" />
+</p>
 
 ---
 
@@ -17,16 +25,25 @@ yay -S record-ui-git
 # or:  paru -S record-ui-git
 ```
 
-That pulls **dependencies** (`wf-recorder`, `slurp`, `ffmpeg`, GTK, …), installs `record-ui`, and registers the app menu entry.
+That installs the app **and** hard deps (`wf-recorder`, `slurp`, `ffmpeg`, GTK, …), puts `record-ui` on `PATH`, and registers the menu entry for **walker**.
+
+If `yay` says *No AUR package found*, refresh the AUR cache:
+
+```bash
+yay -Sya
+yay -S record-ui-git
+```
+
+Package page: https://aur.archlinux.org/packages/record-ui-git
 
 Then:
 
 ```bash
-record-ui          # open the control window
-# or search "record-ui" in walker
+record-ui          # GUI
+# or search “record-ui” in walker
 ```
 
-Optional keybind (Hyprland), adjust the combo if it clashes:
+Optional keybind:
 
 ```conf
 bind = SUPER SHIFT, A, exec, record-ui toggle-region
@@ -38,28 +55,27 @@ bind = SUPER SHIFT, A, exec, record-ui toggle-region
 
 | Want | Do |
 |------|-----|
-| GUI | `record-ui` → pick mode → **Record** / **Stop** |
-| Quick region (keybind) | `record-ui toggle-region` again to stop |
-| One monitor from CLI | `record-ui fullscreen --output NAME --fps 60` |
-| Both screens (2 only) | GUI **2 monitors**, or `record-ui both` |
-| List monitors | `record-ui list-outputs` |
-| Quit background session | `record-ui quit` |
+| GUI | `record-ui` → mode → **Record** / **Stop** |
+| Quick region | `record-ui toggle-region` (again to stop) |
+| One monitor (CLI) | `record-ui fullscreen --output NAME --fps 60` |
+| Both screens | GUI **2 monitors**, or `record-ui both` |
+| List outputs | `record-ui list-outputs` |
+| Quit session | `record-ui quit` |
 
-Closing the window **does not** stop a recording — use **Stop** or `record-ui stop`.
+Closing the window **does not** stop a recording — use **Stop**.
 
-**2 monitors** needs exactly two displays + `ffmpeg`. More or fewer → mode stays off (by design for now). Monitors are detected live (not hardcoded).
+**2 monitors** needs exactly two displays (detected live via `hyprctl`, not hardcoded). 3+ not supported yet.
 
 ---
 
 ## Config (optional)
 
-`~/.config/record-ui/config.toml` — created when you change monitor/FPS in the GUI.
+`~/.config/record-ui/config.toml` — also written when you change monitor/FPS in the GUI.
 
 ```toml
 # output_dir = "/home/you/Videos"
 # fullscreen_output = "DP-1"
 # one_fps = 144
-# audio_default = false
 ```
 
 ---
@@ -68,15 +84,13 @@ Closing the window **does not** stop a recording — use **Stop** or `record-ui 
 
 ```bash
 cargo install --path . --locked
-# needs: rust, pkgconf, gtk4, libadwaita + runtime deps above
+# Rust toolchain + pkgconf + gtk4 + libadwaita; runtime: wf-recorder, slurp, ffmpeg
 ```
-
-Arch packaging notes for maintainers: [packaging/aur/README.md](packaging/aur/README.md).
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — [LICENSE](LICENSE).
 
-Design / internals (optional reading): [SPEC.md](SPEC.md), [docs/DUAL-MONITOR.md](docs/DUAL-MONITOR.md).
+Internals (optional): [SPEC.md](SPEC.md) · [docs/DUAL-MONITOR.md](docs/DUAL-MONITOR.md) · [packaging/aur/](packaging/aur/)
