@@ -225,8 +225,10 @@ record-ui both --audio   # exactly 2 heads; compose after stop
 record-ui          # or: record-ui gui
 ```
 
-Target chrome (see multi-monitor SPEC): Region | One | Both, monitor + FPS when One, System audio, Record/Stop, state, timer, last path, open actions.
+Chrome (see multi-monitor SPEC): **Region | One monitor | Both**, monitor + FPS lists (sensitive only in One), System audio, Record/Stop, state, timer, last path, open actions.
 
+- **Both** is enabled only with exactly two monitors **and** `ffmpeg` on `PATH`; otherwise the button is disabled with a clear reason (“Both requires exactly two monitors.” / “Both requires ffmpeg.”).
+- Both status line shows `Both: A + B`; stop may show `Stopping… Composing…` while the post-stop layout-true stitch runs (blocking).
 - Timer tracks server time so attaching mid-recording stays correct.
 - Close window ≠ stop recording.
 
@@ -278,4 +280,4 @@ Unit and IPC tests do **not** require a live Wayland session (mocked ports / tem
 
 ## Out of scope (v1)
 
-Tray icon, video MIME clipboard, replay buffer, streaming, portal capture engine, monitor picker, auto-edit of Hyprland config, Flathub packaging. See [SPEC.md](SPEC.md) for the full list.
+Tray icon, video MIME clipboard, replay buffer, streaming, portal capture engine, multi-select 3+ Both, live remux / async compose progress, auto-edit of Hyprland config, Flathub packaging. See [SPEC.md](SPEC.md) and [`docs/DUAL-MONITOR.md`](docs/DUAL-MONITOR.md) for the full list.

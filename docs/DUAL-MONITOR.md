@@ -1,17 +1,17 @@
 # record-ui — Multi-monitor capture SPEC
 
-**Status:** `ready-for-agent` (product decisions closed via human grill; supersedes workflow-only MVP)  
+**Status:** `shipped` (P0 One pickers + P1 Both dual session / GUI Both; product decisions closed 2026-07-25)  
 **Parent:** `SPEC.md` v1 (daemon-on-demand, exclusive session, cooperative stop)  
 **Date decisions closed:** 2026-07-25  
 **Engine:** `wf-recorder` 0.6.x + `ffmpeg` (Both only)
 
 This document is the **normative product + architecture slice** for:
 
-1. **UI monitor picker** (One monitor mode)
-2. **UI FPS picker** (One monitor mode)
-3. **Both monitors** — one final file, layout-true canvas, compose **after** stop
+1. **UI monitor picker** (One monitor mode) — **shipped**
+2. **UI FPS picker** (One monitor mode) — **shipped**
+3. **Both monitors** — one final file, layout-true canvas, compose **after** stop — **shipped** (CLI `both` + GUI Both mode)
 
-It **replaces** the earlier “Feature 1 only / Both deferred forever” framing from the automated workflow. Partial code may already exist for hard `-o` resolve; this SPEC is the target. Where code and this doc disagree, **this doc wins** until implemented.
+It **replaces** the earlier “Feature 1 only / Both deferred forever” framing from the automated workflow. Where runtime code and this doc disagree on product intent, **this doc wins** as the contract.
 
 ---
 
@@ -363,12 +363,20 @@ Both uses Recording with dual ownership; Stopping covers dual reap + stitch (sti
 
 ## 12. Implementation phases (same SPEC, ship order)
 
-| Phase | Deliverable | User-visible |
-|-------|-------------|--------------|
-| **P0** | Inventory API stable; One: GUI monitor + FPS lists; persist config; IPC/CLI `--output`/`--fps`; hard `-o` | Can pick monitor + 144/30 in UI |
-| **P1** | Both: dual session, stop+stitch layout-true, GUI mode, CLI `both` | Can record both monitors into one file |
+| Phase | Deliverable | User-visible | Status |
+|-------|-------------|--------------|--------|
+| **P0** | Inventory API stable; One: GUI monitor + FPS lists; persist config; IPC/CLI `--output`/`--fps`; hard `-o` | Can pick monitor + 144/30 in UI | **Shipped** |
+| **P1** | Both: dual session, stop+stitch layout-true, GUI mode, CLI `both` | Can record both monitors into one file | **Shipped** |
 
-P0 alone is already valuable; **P1 is in-scope for this SPEC** (not a vague later idea). Agents may PR P0 then P1 but must not “close” the product after P0 as done.
+### Live gaps (post-P1)
+
+Not open product work for this SPEC — deferred / out of scope by design:
+
+- Live/FIFO remux or async “Composing…” IPC state machine (stop remains blocking; GUI shows `Stopping…` / `Stopping… Composing…`)
+- Both with 1 or 3+ monitors / multi-select
+- Same-height scale + hstack as Both default
+- `toggle-both` / `toggle-one` keybinds (One/Both = open GUI)
+- Per-monitor audio devices
 
 ---
 
@@ -397,4 +405,4 @@ Parent still owns: daemon-on-demand, socket IPC framing, cooperative stop timeou
 
 This file owns: multi-monitor modes, UI pickers, Both pipeline, related CLI/IPC/config keys.
 
-Update parent Out of scope table when implementing: remove “GUI dropdown deferred” and “Both deferred P1-only-docs”.
+Parent Out of scope table should list GUI pickers and Both layout-true stitch as **in scope / shipped** (not deferred).

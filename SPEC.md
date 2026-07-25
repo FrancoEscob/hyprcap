@@ -24,7 +24,7 @@ The user wants a small native app: pick a region, record, stop without fighting 
 
 Ship **record-ui**: a Rust tool with:
 
-1. A **session server** (daemon-on-demand) that owns at most one `wf-recorder` child.
+1. A **session server** (daemon-on-demand) that owns the exclusive recording **session** (Region/One = one `wf-recorder` child; **Both** = two process groups + post-stop `ffmpeg` stitch).
 2. A **CLI client** for Hyprland keybinds (`toggle-region`, `stop`, `status`) that never initializes GTK.
 3. An optional **GTK4 + libadwaita** window as a view on the same session.
 
@@ -41,13 +41,13 @@ Capture/encoding remains entirely in `wf-recorder`.
 1. First `record-ui` invocation that needs the session **starts a server**:
    - Binds Unix socket `$XDG_RUNTIME_DIR/record-ui.sock` with mode `0600`.
    - Writes `$XDG_RUNTIME_DIR/record-ui.pid`.
-   - Owns the sole `Recorder` and the exclusive recording **session** (one `wf-recorder` child today; a future Both mode may own two recorder children under the same session).
+   - Owns the sole `Recorder` and the exclusive recording **session**: Region/One = one `wf-recorder` child; **Both** = two `wf-recorder` process groups under the same session, plus blocking post-stop `ffmpeg` layout-true stitch.
 2. Later invocations are **clients**: send one command over the socket, print result, exit (except `gui`, which stays connected as a view).
 3. If bind fails with address in use → connect as client. If connect fails and PID file points to a dead process → remove stale socket/pid and become server.
 4. **GUI is a client view.** Closing the window **disconnects the view only**; the server keeps recording if active.
 5. **Server exit policy:** when state is `Idle` and no GUI client is connected, the server may exit immediately (v1 default: exit when idle and last client disconnects). Explicit `record-ui quit` forces stop-if-recording then server exit.
-6. **CLI paths must not initialize GTK** (no Adwaita/GTK init on `toggle-region`, `stop`, `status`, `region`, `fullscreen`, `quit`).
-7. At most one user-visible recording **session** managed by this app (one OS child today). External `wf-recorder` instances are ignored.
+6. **CLI paths must not initialize GTK** (no Adwaita/GTK init on `toggle-region`, `stop`, `status`, `region`, `fullscreen`, `both`, `quit`).
+7. At most one user-visible recording **session** managed by this app (Region/One: one OS child; Both: dual recorder children + optional stitch child during stop). External `wf-recorder` instances are ignored.
 
 ---
 
@@ -83,7 +83,7 @@ Capture/encoding remains entirely in `wf-recorder`.
 28. As a Hyprland user, I want start feedback for keybind-only flows (short “Recording started” notify when start came from CLI without GUI), so that I am not blind until stop.
 29. As a Hyprland user, I want multi-monitor region capture via slurp geometry (same as known-good CLI), so that multi-head works without a custom picker.
 30. As a developer, I want one testable `Recorder` behind CLI and GUI, so that behavior stays consistent.
-31. As a Hyprland user, I want one-monitor fullscreen recording (`wf-recorder -o NAME`) as a secondary mode: pin `fullscreen_output` or pass `--output` / IPC `output` when multi-monitor; sole head auto-resolves; never market as all monitors. GUI dropdown deferred; see `docs/DUAL-MONITOR.md`.
+31. As a Hyprland user, I want one-monitor fullscreen recording (`wf-recorder -o NAME`) as a secondary mode: pin `fullscreen_output` or pass `--output` / IPC `output` when multi-monitor; sole head auto-resolves; never market as all monitors. GUI monitor + FPS pickers and Both mode: see `docs/DUAL-MONITOR.md`.
 32. As a Hyprland user, I want notify text to say that the **path** was copied (not the video), so that Discord/Ctrl+V expectations are honest.
 33. As a Hyprland user, I want stale locks/sockets recovered when the previous server died, so that the app does not stay “busy” forever.
 34. As a Hyprland user, I want `record-ui stop` to always be able to stop a session started from GUI or keybind, so that I recover without a tray icon.

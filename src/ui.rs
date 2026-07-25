@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -92,6 +92,11 @@ enum WorkerCmd {
         output: Option<String>,
         /// Explicit FPS for this start. `Some(0)` forces Auto (no `-r`).
         fps: Option<u32>,
+    },
+    /// Dual-monitor Both session (exactly 2 heads + ffmpeg; layout on server).
+    StartBoth {
+        audio: bool,
+        epoch: u64,
     },
     Stop,
     ShutdownWorker,
@@ -201,7 +206,9 @@ fn worker_main(
                 WorkerCmd::ShutdownWorker => shutdown = true,
                 WorkerCmd::Stop => want_stop = true,
                 WorkerCmd::PollStatus => want_poll = true,
-                s @ WorkerCmd::StartRegion { .. } | s @ WorkerCmd::StartFullscreen { .. } => {
+                s @ WorkerCmd::StartRegion { .. }
+                | s @ WorkerCmd::StartFullscreen { .. }
+                | s @ WorkerCmd::StartBoth { .. } => {
                     starts.push(s);
                 }
             }
@@ -274,6 +281,9 @@ fn worker_main(
                         },
                         epoch,
                     ),
+                    WorkerCmd::StartBoth { audio, epoch } => {
+                        ("start both", IpcRequest::start_both(Some(audio)), epoch)
+                    }
                     _ => return,
                 };
                 match client::request(&sock, &req) {
@@ -449,17 +459,47 @@ fn is_transient(e: &ClientError) -> bool {
 // Window
 // ---------------------------------------------------------------------------
 
+/// Minimum gap between idle-path Both gate revalidates (avoids hyprctl every status poll).
+const BOTH_REVALIDATE_IDLE_MIN: Duration = Duration::from_secs(10);
+
+/// Whether idle chrome should run a live Both gate check (pure; unit-tested).
+///
+/// - First attach (`prev_state` None) → true
+/// - Busy → Idle edge (`prev_state` not Idle) → true
+/// - Steady Idle polls → true only when `elapsed_since_last` is None or ≥ `min_interval`
+fn should_revalidate_both_on_idle(
+    prev_state: Option<&str>,
+    elapsed_since_last: Option<Duration>,
+    min_interval: Duration,
+) -> bool {
+    let entering_idle = match prev_state {
+        None => true, // first status / Subscribed
+        Some("Idle") => false,
+        Some(_) => true, // was busy (Recording/Stopping/…)
+    };
+    let stale = match elapsed_since_last {
+        None => true, // never stamped
+        Some(e) => e >= min_interval,
+    };
+    entering_idle || stale
+}
+
 struct ViewState {
     last_status: Option<IpcStatus>,
     last_path: Option<String>,
-    /// Start (region/fullscreen) RPC in flight.
+    /// Start (region/fullscreen/both) RPC in flight.
     start_in_flight: bool,
     /// Stop RPC in flight.
     stop_in_flight: bool,
+    /// Stop may block on Both layout-true stitch — keep Composing UI copy.
+    /// Set when stop is requested for a Both session (incl. start_in_flight + Both mode).
+    stopping_both: bool,
     /// Epoch for the active start request; Stop/new start bumps it.
     start_epoch: u64,
     /// Whether we already applied status.audio to the checkbox this session attach.
     audio_from_server: bool,
+    /// Last time we ran live inventory/ffmpeg gate check (idle chrome throttle).
+    last_both_revalidate: Option<Instant>,
 }
 
 fn build_window(
@@ -492,13 +532,10 @@ fn build_window(
     let mode_row = GtkBox::new(Orientation::Horizontal, 6);
     let region_btn = ToggleButton::with_label("Region");
     let full_btn = ToggleButton::with_label("One monitor");
-    // Both: placeholder until dual-capture stitch (slice 05); always disabled here.
     let both_btn = ToggleButton::with_label("Both");
     region_btn.set_active(true);
     full_btn.set_group(Some(&region_btn));
     both_btn.set_group(Some(&region_btn));
-    both_btn.set_sensitive(false);
-    both_btn.set_tooltip_text(Some("Both monitors — not available yet"));
     region_btn.set_hexpand(true);
     full_btn.set_hexpand(true);
     both_btn.set_hexpand(true);
@@ -511,6 +548,12 @@ fn build_window(
     let env_paths = EnvPaths::from_env();
     let loaded_cfg = Config::load(&env_paths).unwrap_or_else(|_| Config::with_defaults(&env_paths));
     let inventory = sys::list_output_inventory();
+    // Both enablement: exactly 2 heads + ffmpeg on PATH (DUAL-MONITOR §5.2).
+    // Revalidated on idle status and on Record when Both is selected (hotplug).
+    let both_gate = both_enablement(inventory.len(), sys::which("ffmpeg").is_some());
+    let both_eligible = Rc::new(Cell::new(both_gate.enabled()));
+    both_btn.set_sensitive(both_gate.enabled());
+    both_btn.set_tooltip_text(Some(both_gate.tooltip()));
     let picker = Rc::new(RefCell::new(PickerState::from_inventory_and_config(
         inventory,
         &loaded_cfg,
@@ -548,6 +591,8 @@ fn build_window(
 
     let audio_check = CheckButton::with_label("System audio");
     audio_check.set_active(false);
+    // Both uses primary-only `-a`; one track is intentional (DUAL-MONITOR §5.5).
+    audio_check.set_tooltip_text(Some("One desktop audio track (not per monitor)."));
     root.append(&audio_check);
 
     let primary = Button::with_label("Record");
@@ -597,8 +642,11 @@ fn build_window(
         last_path: None,
         start_in_flight: false,
         stop_in_flight: false,
+        stopping_both: false,
         start_epoch: 0,
         audio_from_server: false,
+        // Initial build already ran list_output_inventory + which(ffmpeg).
+        last_both_revalidate: Some(Instant::now()),
     }));
 
     // Track timeout SourceIds so close can cancel them.
@@ -636,6 +684,32 @@ fn build_window(
             };
             monitor_dd_b.set_sensitive(idle);
             fps_dd_b.set_sensitive(idle);
+        });
+        // Both: pickers always inactive (nothing to choose).
+        // Revalidate gate when user activates Both (hotplug-friendly; not on status poll).
+        let monitor_dd_c = monitor_dd.clone();
+        let fps_dd_c = fps_dd.clone();
+        let both_eligible_c = Rc::clone(&both_eligible);
+        let view_c = Rc::clone(&view);
+        let closed_c = Rc::clone(&closed);
+        both_btn.connect_toggled(move |btn| {
+            if closed_c.get() || !btn.is_active() {
+                return;
+            }
+            monitor_dd_c.set_sensitive(false);
+            fps_dd_c.set_sensitive(false);
+            let gate = revalidate_both_gate(btn, &both_eligible_c);
+            view_c.borrow_mut().last_both_revalidate = Some(Instant::now());
+            let idle = {
+                let v = view_c.borrow();
+                v.last_status
+                    .as_ref()
+                    .map(|s| s.state.as_str() == "Idle")
+                    .unwrap_or(true)
+                    && !v.start_in_flight
+                    && !v.stop_in_flight
+            };
+            btn.set_sensitive(idle && gate.enabled());
         });
     }
 
@@ -728,6 +802,7 @@ fn build_window(
         let worker = Rc::clone(&worker);
         let region_btn = region_btn.clone();
         let full_btn = full_btn.clone();
+        let both_btn = both_btn.clone();
         let monitor_dd = monitor_dd.clone();
         let fps_dd = fps_dd.clone();
         let audio_check = audio_check.clone();
@@ -738,6 +813,7 @@ fn build_window(
         let window_weak = window.downgrade();
         let closed = Rc::clone(&closed);
         let start_epoch_counter = Rc::clone(&start_epoch_counter);
+        let both_eligible = Rc::clone(&both_eligible);
         primary.connect_clicked(move |_| {
             if closed.get() {
                 return;
@@ -748,7 +824,8 @@ fn build_window(
                 return;
             };
 
-            let (session_busy, start_in_flight, stop_in_flight) = {
+            let both_mode = both_btn.is_active();
+            let (session_busy, start_in_flight, stop_in_flight, was_both) = {
                 let v = view.borrow();
                 let busy = v
                     .last_status
@@ -756,7 +833,14 @@ fn build_window(
                     .map(|s| s.state.as_str() != "Idle")
                     .unwrap_or(false)
                     || v.start_in_flight;
-                (busy, v.start_in_flight, v.stop_in_flight)
+                // capture_mode may still be unset while Both start RPC is in flight.
+                let was_both = v
+                    .last_status
+                    .as_ref()
+                    .and_then(|s| s.capture_mode.as_deref())
+                    == Some("both")
+                    || (v.start_in_flight && both_mode);
+                (busy, v.start_in_flight, v.stop_in_flight, was_both)
             };
 
             // Stop path: allowed while SelectingRegion/Recording/start in flight.
@@ -768,6 +852,7 @@ fn build_window(
                     Ok(()) => {
                         let mut v = view.borrow_mut();
                         v.stop_in_flight = true;
+                        v.stopping_both = was_both;
                         // Only invalidate start when a start RPC is actually in flight
                         // (avoid killing a future Start OpDone on idle no-op stop races).
                         if v.start_in_flight {
@@ -777,7 +862,12 @@ fn build_window(
                         // Keep start_in_flight until Stop OpDone/Error so label stays Stop;
                         // late Start is ignored via epoch when we bumped it.
                         drop(v);
-                        msg_label.set_text("Stopping…");
+                        // Both stop blocks on layout-true ffmpeg stitch — be honest.
+                        msg_label.set_text(if was_both {
+                            "Stopping… Composing…"
+                        } else {
+                            "Stopping…"
+                        });
                         primary_btn.set_sensitive(false);
                     }
                     Err(_) => {
@@ -794,10 +884,20 @@ fn build_window(
             let audio = audio_check.is_active();
             let region = region_btn.is_active();
             let one = full_btn.is_active();
-            if !region && !one {
-                // Both is disabled; should not be active. Guard anyway.
-                msg_label.set_text("Select Region or One monitor");
+            let both = both_mode;
+            if !region && !one && !both {
+                msg_label.set_text("Select Region, One monitor, or Both");
                 return;
+            }
+            if both {
+                // Live revalidate (hotplug / PATH): required false-positive guard before StartBoth.
+                let gate = revalidate_both_gate(&both_btn, &both_eligible);
+                view.borrow_mut().last_both_revalidate = Some(Instant::now());
+                if !gate.enabled() {
+                    both_btn.set_sensitive(false);
+                    msg_label.set_text(gate.tooltip());
+                    return;
+                }
             }
             if one && picker.borrow().inventory.is_empty() {
                 msg_label.set_text("No outputs discovered (hyprctl monitors / wf-recorder -L)");
@@ -806,6 +906,8 @@ fn build_window(
             let epoch = start_epoch_counter.fetch_add(1, Ordering::SeqCst) + 1;
             let cmd = if region {
                 WorkerCmd::StartRegion { audio, epoch }
+            } else if both {
+                WorkerCmd::StartBoth { audio, epoch }
             } else {
                 let p = picker.borrow();
                 let output = p.selected_output_name().map(|s| s.to_string());
@@ -828,6 +930,7 @@ fn build_window(
                     // Immediately freeze mode/pickers (don't wait for status poll).
                     region_btn.set_sensitive(false);
                     full_btn.set_sensitive(false);
+                    both_btn.set_sensitive(false);
                     monitor_dd.set_sensitive(false);
                     fps_dd.set_sensitive(false);
                     audio_check.set_sensitive(false);
@@ -837,6 +940,9 @@ fn build_window(
                         if let Some(win) = window_weak.upgrade() {
                             win.minimize();
                         }
+                    } else if both {
+                        // Neutral copy: inventory list order ≠ server primary (min x,y).
+                        msg_label.set_text("Starting… Both");
                     } else {
                         let name = picker
                             .borrow()
@@ -951,6 +1057,7 @@ fn build_window(
             region_btn,
             full_btn,
             both_btn,
+            both_eligible: Rc::clone(&both_eligible),
             monitor_dd,
             fps_dd,
             audio_check,
@@ -1036,6 +1143,8 @@ struct UiWidgets {
     region_btn: ToggleButton,
     full_btn: ToggleButton,
     both_btn: ToggleButton,
+    /// Live gate: inventory_len==2 && ffmpeg on PATH (revalidated idle / Both Record).
+    both_eligible: Rc<Cell<bool>>,
     monitor_dd: DropDown,
     fps_dd: DropDown,
     audio_check: CheckButton,
@@ -1095,6 +1204,7 @@ fn apply_msg(msg: UiMsg, view: &Rc<RefCell<ViewState>>, w: &UiWidgets, closed: &
                     {
                         let mut v = view.borrow_mut();
                         v.stop_in_flight = false;
+                        v.stopping_both = false;
                         // Stop supersedes any in-flight start UI flag.
                         v.start_in_flight = false;
                     }
@@ -1124,6 +1234,7 @@ fn apply_msg(msg: UiMsg, view: &Rc<RefCell<ViewState>>, w: &UiWidgets, closed: &
                         // Recoverable: stop failed — clear both flags so Record/Stop
                         // is not stuck (start may have been invalidated by epoch bump).
                         v.stop_in_flight = false;
+                        v.stopping_both = false;
                         v.start_in_flight = false;
                     }
                     ErrorSource::Status => {
@@ -1170,8 +1281,8 @@ fn format_op_message(kind: OpKind, resp: &IpcResponse) -> String {
                 if resp.code == "slurp_cancel" {
                     "Region selection canceled".into()
                 } else if resp.status.state == "Recording" {
-                    if let Some(ref o) = resp.status.capture_output {
-                        format!("Output: {o}")
+                    if let Some(msg) = format_capture_message(&resp.status) {
+                        msg
                     } else if !resp.message.is_empty()
                         && resp.message.to_lowercase().contains("recording")
                     {
@@ -1207,12 +1318,66 @@ fn format_op_message(kind: OpKind, resp: &IpcResponse) -> String {
     }
 }
 
+/// Status line for active capture: `Output: NAME` (One) or `Both: A + B` (Both).
+///
+/// `capture_output` for Both is stored as `A+B` (server); pretty-print with spaces.
+/// Mode branch is the product contract (`both` vs other); `+` is cosmetic only.
+fn format_capture_message(status: &IpcStatus) -> Option<String> {
+    let o = status.capture_output.as_ref()?;
+    if status.capture_mode.as_deref() == Some("both") {
+        let pretty = o.replace('+', " + ");
+        Some(format!("Both: {pretty}"))
+    } else {
+        // Region normally has no capture_output; if present, still show Output: …
+        Some(format!("Output: {o}"))
+    }
+}
+
+/// Stopping / compose honesty while stop RPC or server Stopping is active.
+///
+/// `stopping_both` covers start_in_flight Both stops before `capture_mode` is known.
+fn format_stopping_message(status: &IpcStatus, stopping_both: bool) -> String {
+    if stopping_both || status.capture_mode.as_deref() == Some("both") {
+        "Stopping… Composing…".into()
+    } else {
+        "Stopping…".into()
+    }
+}
+
+/// Pure message-line policy for [`apply_status`] (unit-tested).
+///
+/// Branch order:
+/// 1. Explicit `message` wins (op notes / errors).
+/// 2. Stopping or stop_in_flight → stopping / compose honesty (never Both capture label).
+/// 3. Recording / Starting → capture label when present.
+/// 4. Else leave unchanged (`None`).
+fn status_message_line(
+    message: Option<&str>,
+    status: &IpcStatus,
+    stop_in_flight: bool,
+    stopping_both: bool,
+) -> Option<String> {
+    if let Some(m) = message {
+        return Some(m.to_string());
+    }
+    if status.state == "Stopping" || stop_in_flight {
+        return Some(format_stopping_message(status, stopping_both));
+    }
+    if matches!(status.state.as_str(), "Recording" | "Starting") {
+        return format_capture_message(status);
+    }
+    None
+}
+
 fn apply_status(
     status: IpcStatus,
     view: &Rc<RefCell<ViewState>>,
     w: &UiWidgets,
     message: Option<&str>,
 ) {
+    // Capture previous server state before overwrite (edge-trigger into Idle).
+    let prev_state = view.borrow().last_status.as_ref().map(|s| s.state.clone());
+
     {
         let mut v = view.borrow_mut();
         if let Some(ref p) = status.last_success_path {
@@ -1246,13 +1411,12 @@ fn apply_status(
         w.open_folder_btn.set_sensitive(true);
     }
 
-    // Mandatory Output: NAME after one-monitor resolve (status or start message).
-    if let Some(m) = message {
-        w.msg_label.set_text(m);
-    } else if let Some(ref o) = status.capture_output {
-        if matches!(status.state.as_str(), "Recording" | "Starting" | "Stopping") {
-            w.msg_label.set_text(&format!("Output: {o}"));
-        }
+    let (stop_in_flight, stopping_both) = {
+        let v = view.borrow();
+        (v.stop_in_flight, v.stopping_both)
+    };
+    if let Some(msg) = status_message_line(message, &status, stop_in_flight, stopping_both) {
+        w.msg_label.set_text(&msg);
     }
 
     let idle = {
@@ -1261,9 +1425,22 @@ fn apply_status(
     };
     w.region_btn.set_sensitive(idle);
     w.full_btn.set_sensitive(idle);
-    // Both stays disabled until dual-capture (slice 05).
-    w.both_btn.set_sensitive(false);
+    // Both chrome: never spawn hyprctl/ffmpeg on the 350ms poll path.
+    // Live revalidate only via should_revalidate_both_on_idle (edge + throttle).
+    // Record path always revalidates before StartBoth; Both toggle also revalidates.
+    if idle {
+        let elapsed = view.borrow().last_both_revalidate.map(|t| t.elapsed());
+        if should_revalidate_both_on_idle(prev_state.as_deref(), elapsed, BOTH_REVALIDATE_IDLE_MIN)
+        {
+            revalidate_both_gate(&w.both_btn, &w.both_eligible);
+            view.borrow_mut().last_both_revalidate = Some(Instant::now());
+        }
+        w.both_btn.set_sensitive(w.both_eligible.get());
+    } else {
+        w.both_btn.set_sensitive(false);
+    }
     w.audio_check.set_sensitive(idle);
+    // Monitor / FPS lists only when mode = One monitor (not Region / Both).
     let one = w.full_btn.is_active();
     w.monitor_dd.set_sensitive(idle && one);
     w.fps_dd.set_sensitive(idle && one);
@@ -1533,6 +1710,62 @@ fn ipc_fps_for_start(selected: Option<u32>) -> Option<u32> {
     Some(selected.unwrap_or(0))
 }
 
+// ---------------------------------------------------------------------------
+// Both enablement (pure; DUAL-MONITOR §5.2)
+// ---------------------------------------------------------------------------
+
+/// GUI Both-mode gate result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BothEnablement {
+    Enabled,
+    /// Tooltip / message when Both must stay disabled.
+    Disabled {
+        reason: &'static str,
+    },
+}
+
+impl BothEnablement {
+    fn enabled(self) -> bool {
+        matches!(self, BothEnablement::Enabled)
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            BothEnablement::Enabled => "Record both monitors into one layout-true file",
+            BothEnablement::Disabled { reason } => reason,
+        }
+    }
+}
+
+/// Both enabled iff exactly **2** monitors in inventory **and** `ffmpeg` on PATH.
+///
+/// Check order (when disabled): ≠2 monitors first, then missing ffmpeg.
+fn both_enablement(inventory_len: usize, ffmpeg_present: bool) -> BothEnablement {
+    if inventory_len != 2 {
+        BothEnablement::Disabled {
+            reason: "Both requires exactly two monitors.",
+        }
+    } else if !ffmpeg_present {
+        BothEnablement::Disabled {
+            reason: "Both requires ffmpeg.",
+        }
+    } else {
+        BothEnablement::Enabled
+    }
+}
+
+/// Live inventory + PATH check; updates eligibility cell and Both tooltip.
+///
+/// Call only from Record (Both), Both-toggle activate, idle **edge**/throttle —
+/// never on every status poll (hyprctl is synchronous on the GTK thread).
+fn revalidate_both_gate(both_btn: &ToggleButton, both_eligible: &Cell<bool>) -> BothEnablement {
+    let inv_len = sys::list_output_inventory().len();
+    let gate = both_enablement(inv_len, sys::which("ffmpeg").is_some());
+    both_eligible.set(gate.enabled());
+    both_btn.set_tooltip_text(Some(gate.tooltip()));
+    gate
+}
+
 /// Persist One-monitor pickers to XDG config (snappy on change).
 ///
 /// - `output`: when `Some(name)`, set `fullscreen_output`. When `None` (empty
@@ -1782,5 +2015,151 @@ mod picker_tests {
         // select_fps_index falls back to native when prefer is absent from list.
         let e = build_fps_entries(Some(60), None);
         assert_eq!(select_fps_index(&e, Some(999), true), 1);
+    }
+
+    #[test]
+    fn both_enablement_matrix_all_cells() {
+        const MON: &str = "Both requires exactly two monitors.";
+        const FF: &str = "Both requires ffmpeg.";
+        const OK: &str = "Record both monitors into one layout-true file";
+        // Every cell of {0,1,2,3} × {ffmpeg T/F}.
+        let cases: &[(usize, bool, bool, &str)] = &[
+            (0, false, false, MON),
+            (0, true, false, MON),
+            (1, false, false, MON),
+            (1, true, false, MON),
+            (2, false, false, FF),
+            (2, true, true, OK),
+            (3, false, false, MON),
+            (3, true, false, MON),
+        ];
+        for &(n, ff, want_en, want_tip) in cases {
+            let g = both_enablement(n, ff);
+            assert_eq!(g.enabled(), want_en, "enabled n={n} ff={ff}: got {:?}", g);
+            assert_eq!(g.tooltip(), want_tip, "tooltip n={n} ff={ff}");
+        }
+    }
+
+    #[test]
+    fn should_revalidate_both_on_idle_table() {
+        let min = BOTH_REVALIDATE_IDLE_MIN; // 10s
+        let s = Duration::from_secs;
+        // (prev_state, elapsed_since_last, want)
+        let cases: &[(Option<&str>, Option<Duration>, bool)] = &[
+            // First attach
+            (None, Some(s(0)), true),
+            (None, None, true),
+            // Steady Idle polls — anti-regression (must not fire every 350ms)
+            (Some("Idle"), Some(s(0)), false),
+            (Some("Idle"), Some(s(9)), false),
+            // Throttle fire at/after min_interval
+            (Some("Idle"), Some(s(10)), true),
+            (Some("Idle"), Some(s(11)), true),
+            // Never stamped
+            (Some("Idle"), None, true),
+            // Busy → idle edge even with fresh stamp
+            (Some("Recording"), Some(s(0)), true),
+            (Some("Stopping"), Some(s(0)), true),
+            (Some("Starting"), Some(s(0)), true),
+            (Some("SelectingRegion"), Some(s(0)), true),
+        ];
+        for &(prev, elapsed, want) in cases {
+            assert_eq!(
+                should_revalidate_both_on_idle(prev, elapsed, min),
+                want,
+                "prev={prev:?} elapsed={elapsed:?}"
+            );
+        }
+    }
+
+    fn ipc_status(
+        state: &str,
+        capture_mode: Option<&str>,
+        capture_output: Option<&str>,
+    ) -> IpcStatus {
+        IpcStatus {
+            state: state.into(),
+            output_path: None,
+            pid: None,
+            started_at_unix: None,
+            audio: false,
+            last_error: None,
+            last_success_path: None,
+            elapsed_ms: None,
+            capture_output: capture_output.map(str::to_string),
+            capture_mode: capture_mode.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn format_capture_and_stopping_all_modes() {
+        // One
+        let one = ipc_status("Recording", Some("one"), Some("HDMI-A-1"));
+        assert_eq!(
+            format_capture_message(&one).as_deref(),
+            Some("Output: HDMI-A-1")
+        );
+        assert_eq!(format_stopping_message(&one, false), "Stopping…");
+
+        // Both happy A+B pretty-print
+        let both = ipc_status("Recording", Some("both"), Some("HDMI-A-1+DP-1"));
+        assert_eq!(
+            format_capture_message(&both).as_deref(),
+            Some("Both: HDMI-A-1 + DP-1")
+        );
+        assert_eq!(
+            format_stopping_message(&both, false),
+            "Stopping… Composing…"
+        );
+        // Mode branch is the contract — no '+' still Both:
+        let both_one_name = ipc_status("Recording", Some("both"), Some("HDMI-A-1"));
+        assert_eq!(
+            format_capture_message(&both_one_name).as_deref(),
+            Some("Both: HDMI-A-1")
+        );
+
+        // Region: no capture_output → no capture label; stop is plain Stopping…
+        let region = ipc_status("Recording", Some("region"), None);
+        assert!(format_capture_message(&region).is_none());
+        assert_eq!(format_stopping_message(&region, false), "Stopping…");
+
+        // stopping_both flag wins even when capture_mode unset (start_in_flight stop).
+        let idle = ipc_status("Idle", None, None);
+        assert_eq!(format_stopping_message(&idle, true), "Stopping… Composing…");
+        assert_eq!(format_stopping_message(&idle, false), "Stopping…");
+    }
+
+    #[test]
+    fn status_message_line_branch_order() {
+        let both_rec = ipc_status("Recording", Some("both"), Some("HDMI-A-1+DP-1"));
+        // (c) Recording + both → Both: A + B
+        assert_eq!(
+            status_message_line(None, &both_rec, false, false).as_deref(),
+            Some("Both: HDMI-A-1 + DP-1")
+        );
+
+        // (a) stop_in_flight + both + capture_output → Composing, not Both label
+        assert_eq!(
+            status_message_line(None, &both_rec, true, true).as_deref(),
+            Some("Stopping… Composing…")
+        );
+
+        // (b) Stopping + one → Stopping…
+        let one_stop = ipc_status("Stopping", Some("one"), Some("DP-1"));
+        assert_eq!(
+            status_message_line(None, &one_stop, false, false).as_deref(),
+            Some("Stopping…")
+        );
+
+        // (d) explicit message wins over Stopping
+        assert_eq!(
+            status_message_line(Some("Saved — path ready: /x.mp4"), &one_stop, true, false)
+                .as_deref(),
+            Some("Saved — path ready: /x.mp4")
+        );
+
+        // Idle without stop / message → None (leave label alone)
+        let idle = ipc_status("Idle", None, None);
+        assert!(status_message_line(None, &idle, false, false).is_none());
     }
 }
