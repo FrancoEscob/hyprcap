@@ -41,13 +41,13 @@ Capture/encoding remains entirely in `wf-recorder`.
 1. First `record-ui` invocation that needs the session **starts a server**:
    - Binds Unix socket `$XDG_RUNTIME_DIR/record-ui.sock` with mode `0600`.
    - Writes `$XDG_RUNTIME_DIR/record-ui.pid`.
-   - Owns the sole `Recorder` and the sole `wf-recorder` child.
+   - Owns the sole `Recorder` and the exclusive recording **session** (one `wf-recorder` child today; a future Both mode may own two recorder children under the same session).
 2. Later invocations are **clients**: send one command over the socket, print result, exit (except `gui`, which stays connected as a view).
 3. If bind fails with address in use → connect as client. If connect fails and PID file points to a dead process → remove stale socket/pid and become server.
 4. **GUI is a client view.** Closing the window **disconnects the view only**; the server keeps recording if active.
 5. **Server exit policy:** when state is `Idle` and no GUI client is connected, the server may exit immediately (v1 default: exit when idle and last client disconnects). Explicit `record-ui quit` forces stop-if-recording then server exit.
 6. **CLI paths must not initialize GTK** (no Adwaita/GTK init on `toggle-region`, `stop`, `status`, `region`, `fullscreen`, `quit`).
-7. At most one `wf-recorder` managed by this app. External `wf-recorder` instances are ignored (document: only manages its own child).
+7. At most one user-visible recording **session** managed by this app (one OS child today). External `wf-recorder` instances are ignored.
 
 ---
 
@@ -83,7 +83,7 @@ Capture/encoding remains entirely in `wf-recorder`.
 28. As a Hyprland user, I want start feedback for keybind-only flows (short “Recording started” notify when start came from CLI without GUI), so that I am not blind until stop.
 29. As a Hyprland user, I want multi-monitor region capture via slurp geometry (same as known-good CLI), so that multi-head works without a custom picker.
 30. As a developer, I want one testable `Recorder` behind CLI and GUI, so that behavior stays consistent.
-31. As a Hyprland user, I want fullscreen recording without region as a secondary mode, accepting wf-recorder’s default multi-output behavior (documented limitation; no output picker in v1).
+31. As a Hyprland user, I want one-monitor fullscreen recording (`wf-recorder -o NAME`) as a secondary mode: pin `fullscreen_output` or pass `--output` / IPC `output` when multi-monitor; sole head auto-resolves; never market as all monitors. GUI dropdown deferred; see `docs/DUAL-MONITOR.md`.
 32. As a Hyprland user, I want notify text to say that the **path** was copied (not the video), so that Discord/Ctrl+V expectations are honest.
 33. As a Hyprland user, I want stale locks/sockets recovered when the previous server died, so that the app does not stay “busy” forever.
 34. As a Hyprland user, I want `record-ui stop` to always be able to stop a session started from GUI or keybind, so that I recover without a tray icon.
@@ -106,9 +106,10 @@ Capture/encoding remains entirely in `wf-recorder`.
 | `audio_default` | `false` | System audio off unless toggled/CLI overrides |
 | `copy_path` | `true` | `wl-copy` absolute path on success |
 | `notify` | `true` | Desktop notifications |
-| `notify_on_start_cli` | `true` | “Recording started” when start has no GUI client |
+| `notify_on_start_cli` | `true` | Start notify when start has no GUI client (includes output name when known) |
 | `stop_timeout_ms` | `5000` | Wait after SIGINT before escalation |
 | `stop_term_timeout_ms` | `2000` | Wait after SIGTERM before hard failure |
+| `fullscreen_output` | *(unset)* | Wayland output for one-monitor fullscreen (`-o`). **Required when ≥2 outputs** (no focus auto-pick). Sole output auto-used when inventory length is 1. |
 
 Create `output_dir` if missing. Filename: `rec-YYYYMMDD-HHMMSS.mp4`; if exists, append `-1`, `-2`, … Same-second collisions must not overwrite.
 
@@ -118,13 +119,14 @@ Create `output_dir` if missing. Filename: `rec-YYYYMMDD-HHMMSS.mp4`; if exists, 
 |---------|----------|
 | `record-ui` / `record-ui gui` | Ensure server; open/raise GUI client |
 | `record-ui region [--audio]` | Start region recording (error if busy) |
-| `record-ui fullscreen [--audio]` | Start without `-g` (error if busy) |
+| `record-ui fullscreen [--audio] [--output NAME]` | Start one-monitor capture with `-o NAME` (error if busy / unresolved) |
+| `record-ui list-outputs` | Print inventory: `name\tx\ty\tw\th\trefresh` when geometry known (hyprctl); name-only fallback (`wf-recorder -L`). No daemon. |
 | `record-ui toggle-region [--audio]` | Idle→region start; SelectingRegion→cancel slurp; Recording→stop; Stopping→idempotent wait/no-op |
 | `record-ui stop` | Stop if recording/selecting; no-op success if idle |
 | `record-ui status` | Print one JSON object on stdout (see below) |
 | `record-ui quit` | Stop if needed; shutdown server |
 
-**`status` JSON fields:** `state`, `output_path` (current or null), `pid` (wf-recorder or null), `started_at_unix` (or null), `audio` (bool), `last_error` (string or null), `last_success_path` (string or null), `elapsed_ms` (or null).
+**`status` JSON fields:** `state`, `output_path` (current or null), `pid` (primary recorder or null), `started_at_unix` (or null), `audio` (bool), `last_error` (string or null), `last_success_path` (string or null), `elapsed_ms` (or null), `capture_output` (resolved `-o` name while active, or null).
 
 **CLI exit codes:**
 
@@ -176,10 +178,10 @@ Starting --spawn_fail--> Idle + error
 ### Region / fullscreen argv (normative v1)
 
 - Region: `wf-recorder -g <slurp_stdout_trim> [-a] -f <path>`
-- Fullscreen: `wf-recorder [-a] -f <path>` (no `-g`)
+- Fullscreen (one monitor): `wf-recorder -o <NAME> [-a] -f <path>` (no `-g`; **`-o` always required**)
 - `slurp`: no args; **cancel** = non-zero exit **or** empty stdout → `slurp_cancel`, no error toast (clean abort).
-- Geometry contract: slurp default `x,y WxH` passed through unchanged (user-proven on this machine). Multi-monitor region = accepted CLI parity risk; no extra transforms.
-- Fullscreen multi-monitor = **wf-recorder default** (often one/all outputs depending on version)—documented limitation; output picker is out of scope v1.
+- Geometry contract: slurp default `x,y WxH` passed through unchanged. Region geometry must lie entirely on **one** head (engine fails cross-output geometry); not a multi-head canvas.
+- Fullscreen / One resolve + Both pipeline: **`docs/DUAL-MONITOR.md`** (GUI pickers, FPS, dual capture, layout-true stitch). No focus auto-pick when ≥2 heads for One.
 
 ### Success / failure after stop (normative)
 
@@ -208,14 +210,17 @@ Ordered evaluation after reap:
 |--------|-------|------------------|
 | `wf-recorder` | Hard | Fail start; exit 4 |
 | `slurp` | Hard for region | Fail region start; exit 4 |
+| `ffmpeg` | Hard for **Both** only | Fail Both start; `dep_missing` |
+| `hyprctl` | Soft inventory; **hard for Both layout** | Fail Both if positions unavailable |
 | `notify-send` | Soft | Degrade; warn once |
 | `wl-copy` | Soft | Degrade; warn once |
 | `xdg-open` | Soft for open actions | Fail only that action |
 
 ### GUI behavior
 
-- Small Adwaita window: mode (region/fullscreen), audio toggle (session override; does not have to write config in v1), primary button (Record/Stop), state label, elapsed timer, last path, Open file / Open folder.
-- Before `slurp` from GUI: avoid focus fights where reasonable (e.g. do not keep a modal blocking); keybind path should call CLI without mapping a window first.
+- Small Adwaita window: mode (**Region | One monitor | Both**), monitor list + FPS list (One only), audio toggle, primary Record/Stop, state, timer, last path, Open file / Open folder.
+- **Multi-monitor product (normative detail):** `docs/DUAL-MONITOR.md` — monitor picker, FPS picker (native/30/60/Auto), Both = dual `wf-recorder` @ 60 + **post-stop layout-true** ffmpeg compose (black voids; no same-height scale). Human path for One/Both = open GUI; region keybind stays `toggle-region`.
+- Before `slurp` from GUI: avoid focus fights where reasonable; keybind path calls CLI without mapping a window first.
 - Timer uses server `started_at_unix` / `elapsed_ms` so a GUI that attaches mid-recording shows the correct elapsed time.
 - Microcopy on success: path copied, not video content.
 
@@ -256,7 +261,7 @@ Ideal automated coverage does not need a Wayland compositor.
 | U1 | region start, slurp returns geom | argv has `-g`, geom, `-f`; state Recording |
 | U2 | slurp empty/cancel | no wf-recorder; Idle; slurp_cancel |
 | U3 | audio on/off | `-a` present/absent |
-| U4 | fullscreen start | no `-g` |
+| U4 | fullscreen start | no `-g`; argv has `-o` + non-empty name |
 | U5 | double start | second busy; one child |
 | U6 | stop from Recording | SIGINT to **process group**; wait; Idle |
 | U7 | double stop | idempotent |
@@ -311,7 +316,10 @@ Ideal automated coverage does not need a Wayland compositor.
 | Video MIME clipboard | Explicit “path copied” copy |
 | Replay buffer / streaming / webcam | — |
 | Codec/CRF/VAAPI picker | wf-recorder defaults; manual quality later |
-| Output/monitor picker for fullscreen | Document limitation |
+| GUI output/monitor + FPS pickers | **In scope** — `docs/DUAL-MONITOR.md` |
+| Dual-monitor “Both” layout-true stitch | **In scope** (post-stop compose) — `docs/DUAL-MONITOR.md` |
+| Same-height scaled hstack Both | Out — user rejected |
+| Live remux / async Composing IPC | Out of this slice — stop blocks through stitch |
 | Portal-based capture engine | Error surfaces stderr |
 | Auto-edit Hyprland config | Docs examples only |
 | Flathub / full packaging | Local `cargo install` / PATH notes |

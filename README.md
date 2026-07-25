@@ -2,7 +2,7 @@
 
 Native frontend for [`wf-recorder`](https://github.com/ammen99/wf-recorder) on **Hyprland / wlroots**.
 
-- **Daemon-on-demand** session server owns at most one `wf-recorder` child
+- **Daemon-on-demand** session server owns an exclusive recording session (one `wf-recorder` child today)
 - **CLI** for keybinds (`toggle-region`, `stop`, `status`, …) — never initializes GTK
 - **Optional GTK4 + libadwaita** GUI as a view on the same session
 - Clipboard gets the **absolute file path** (text), not video bytes
@@ -66,7 +66,8 @@ Default with no subcommand is the same as `gui`.
 |---------|----------|
 | `record-ui` / `record-ui gui` | Ensure server; open/raise GUI client |
 | `record-ui region [--audio]` | Start region recording (error if busy) |
-| `record-ui fullscreen [--audio]` | Start without region geometry (error if busy) |
+| `record-ui fullscreen [--audio] [--output NAME]` | Start one-monitor capture (`wf-recorder -o`; error if busy / unresolved) |
+| `record-ui list-outputs` | Print inventory: `name\tx\ty\tw\th\trefresh` when geometry known (hyprctl); name-only fallback (`wf-recorder -L`). No daemon. |
 | `record-ui toggle-region [--audio]` | Idle→region start; SelectingRegion→cancel slurp; Recording→stop; Stopping→idempotent wait/no-op |
 | `record-ui stop` | Stop if recording/selecting; no-op success if idle |
 | `record-ui status` | Print one JSON status object on stdout |
@@ -85,14 +86,14 @@ Default with no subcommand is the same as `gui`.
 
 ### `status` JSON (high level)
 
-Fields include: `state`, `output_path`, `pid`, `started_at_unix`, `audio`, `last_error`, `last_success_path`, `elapsed_ms`.
+Fields include: `state`, `output_path`, `pid`, `started_at_unix`, `audio`, `last_error`, `last_success_path`, `elapsed_ms`, `capture_output` (active one-monitor head when set).
 
 ### Process model (short)
 
 1. First command that needs a session starts a **server** binding `$XDG_RUNTIME_DIR/record-ui.sock` (mode `0600`) and writing `$XDG_RUNTIME_DIR/record-ui.pid`.
 2. Later invocations are **clients** over that socket.
 3. Closing the GUI only disconnects the view — **recording continues** until `stop`, toggle-stop, or `quit`.
-4. Only this app’s own `wf-recorder` child is managed; external instances are ignored.
+4. Exclusive **session**: one managed recording session (one `wf-recorder` child today); external instances are ignored.
 
 Socket path: **`$XDG_RUNTIME_DIR/record-ui.sock`**.
 
@@ -109,9 +110,10 @@ Path: **`$XDG_CONFIG_HOME/record-ui/config.toml`**
 | `audio_default` | `false` | System audio off unless toggled / CLI `--audio` |
 | `copy_path` | `true` | `wl-copy` absolute path on success |
 | `notify` | `true` | Desktop notifications |
-| `notify_on_start_cli` | `true` | Short “Recording started” when start has no GUI client |
+| `notify_on_start_cli` | `true` | Start notify when start has no GUI client (includes output name when known) |
 | `stop_timeout_ms` | `5000` | Wait after SIGINT before SIGTERM |
 | `stop_term_timeout_ms` | `2000` | Wait after SIGTERM before hard failure |
+| `fullscreen_output` | *(unset)* | Wayland output for one-monitor fullscreen (`-o`). **Required when ≥2 outputs**; sole head auto-resolves when inventory length is 1 |
 
 Filename pattern: **`rec-YYYYMMDD-HHMMSS.mp4`**. Same-second collisions append `-1`, `-2`, …  
 `output_dir` is created if missing.
@@ -124,6 +126,8 @@ output_dir = "/home/you/Videos/clips"
 audio_default = false
 copy_path = true
 notify = true
+# Required on multi-monitor for One monitor / fullscreen (no focus auto-pick):
+# fullscreen_output = "DP-1"
 ```
 
 ---
@@ -190,9 +194,19 @@ windowrulev2 = pin, class:^(dev\.recordui\.app)$
 
 If rules do not match (toolkit/version quirks), check the live class/app_id with `hyprctl clients`.
 
-### Fullscreen multi-monitor note
+### Fullscreen / multi-monitor
 
-Fullscreen mode uses `wf-recorder` **without** `-g` (no output picker in v1). Multi-output behavior follows the installed `wf-recorder` defaults. Prefer **region** + `slurp` for multi-monitor clips.
+Normative product spec: **[`docs/DUAL-MONITOR.md`](docs/DUAL-MONITOR.md)** (picker + Both layout-true).
+
+```bash
+record-ui list-outputs
+record-ui fullscreen --output HDMI-A-1 --fps 144
+record-ui both --audio   # exactly 2 heads; compose after stop
+```
+
+- **One:** GUI monitor + FPS lists; pin `fullscreen_output` / `one_fps` in config.
+- **Both:** dual capture @ 60 fps → post-stop **layout-true** stitch (black voids; no scaled hstack).
+- Region geometry must stay on **one** head. Keybind stays region; One/Both via GUI.
 
 ---
 
@@ -202,7 +216,7 @@ Fullscreen mode uses `wf-recorder` **without** `-g` (no output picker in v1). Mu
 record-ui          # or: record-ui gui
 ```
 
-Shows mode (region/fullscreen), audio toggle, Record/Stop, state label, elapsed timer, last success path, Open file / Open folder.
+Target chrome (see multi-monitor SPEC): Region | One | Both, monitor + FPS when One, System audio, Record/Stop, state, timer, last path, open actions.
 
 - Timer tracks server time so attaching mid-recording stays correct.
 - Close window ≠ stop recording.

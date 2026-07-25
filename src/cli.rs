@@ -26,11 +26,15 @@ pub enum Command {
         #[arg(long)]
         audio: bool,
     },
-    /// Start fullscreen recording (no region).
+    /// Start one-monitor fullscreen recording (no region; always `wf-recorder -o`).
     Fullscreen {
         /// Enable system audio (`wf-recorder -a`).
         #[arg(long)]
         audio: bool,
+        /// Wayland output name (`wf-recorder -o`). Required when multi-monitor
+        /// and `fullscreen_output` is unset in config.
+        #[arg(long)]
+        output: Option<String>,
     },
     /// Toggle region: Idle→start, SelectingRegion→cancel, Recording→stop.
     ToggleRegion {
@@ -38,6 +42,8 @@ pub enum Command {
         #[arg(long)]
         audio: bool,
     },
+    /// List known Wayland outputs (name + geometry/refresh when known; no daemon).
+    ListOutputs,
     /// Stop recording / cancel selection (no-op success if idle).
     Stop,
     /// Print one JSON status object on stdout.
@@ -100,11 +106,25 @@ fn dispatch(cmd: Command) -> Result<i32, String> {
             print_message(&resp);
             Ok(exit_from(&resp))
         }
-        Command::Fullscreen { audio } => {
+        Command::Fullscreen { audio, output } => {
             let audio = if audio { Some(true) } else { None };
-            let resp = ensure_and_request(&IpcRequest::start_fullscreen(audio))?;
+            let resp = ensure_and_request(&IpcRequest::start_fullscreen(audio, output))?;
             print_message(&resp);
             Ok(exit_from(&resp))
+        }
+        Command::ListOutputs => {
+            // Prefer hyprctl rich inventory; names-only fallback prints name alone.
+            let inv = record_ui::sys::list_output_inventory();
+            let mut out = std::io::stdout();
+            for o in &inv {
+                writeln!(out, "{}", o.display_line()).map_err(|e| e.to_string())?;
+            }
+            if inv.is_empty() {
+                eprintln!("record-ui: no outputs discovered (hyprctl monitors / wf-recorder -L)");
+                Ok(1)
+            } else {
+                Ok(0)
+            }
         }
         Command::ToggleRegion { audio } => {
             let audio = if audio { Some(true) } else { None };

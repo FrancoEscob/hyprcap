@@ -138,6 +138,8 @@ pub struct Status {
     pub last_error: Option<String>,
     pub last_success_path: Option<PathBuf>,
     pub elapsed_ms: Option<u64>,
+    /// Resolved Wayland output for one-monitor fullscreen (`-o`), if any.
+    pub capture_output: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +182,10 @@ where
     stop_sent_signals: Vec<Signal>,
     /// Pid retained for `status` while Stopping (child taken out of Option for wait).
     stopping_pid: Option<u32>,
+    /// Active fullscreen / one-monitor output name (fixed at start).
+    capture_output: Option<String>,
+    /// When set, used instead of probing hyprctl/wf-recorder (tests / inject).
+    forced_output_inventory: Option<Vec<String>>,
 }
 
 impl<S, C, N, Cl> Recorder<S, C, N, Cl>
@@ -211,7 +217,20 @@ where
             last_child_exit: None,
             stop_sent_signals: Vec::new(),
             stopping_pid: None,
+            capture_output: None,
+            forced_output_inventory: None,
         }
+    }
+
+    /// Inject output inventory for tests (avoids calling hyprctl).
+    pub fn set_forced_output_inventory(&mut self, inventory: Option<Vec<String>>) {
+        self.forced_output_inventory = inventory;
+    }
+
+    fn output_inventory(&self) -> Vec<String> {
+        self.forced_output_inventory
+            .clone()
+            .unwrap_or_else(crate::sys::list_output_names)
     }
 
     pub fn state(&self) -> State {
@@ -282,6 +301,14 @@ where
             last_success_path: self.last_success_path.clone(),
             elapsed_ms: if matches!(self.state, State::Recording | State::Stopping) {
                 elapsed_ms
+            } else {
+                None
+            },
+            capture_output: if matches!(
+                self.state,
+                State::Starting | State::Recording | State::Stopping
+            ) {
+                self.capture_output.clone()
             } else {
                 None
             },
@@ -416,8 +443,15 @@ where
         Some(self.finish_slurp(status, &mut child))
     }
 
-    /// Fullscreen start (no `-g`).
-    pub fn start_fullscreen(&mut self, audio: Option<bool>, notify_start: bool) -> CommandResult {
+    /// Fullscreen / one-monitor start: always `wf-recorder -o NAME` (no `-g`).
+    ///
+    /// `output_override`: CLI/IPC `--output` / `output` (wins over config pin).
+    pub fn start_fullscreen(
+        &mut self,
+        audio: Option<bool>,
+        notify_start: bool,
+        output_override: Option<&str>,
+    ) -> CommandResult {
         if self.state != State::Idle {
             return CommandResult::err(
                 MachineCode::Busy,
@@ -429,10 +463,23 @@ where
             self.last_error = Some(msg.clone());
             return CommandResult::err(MachineCode::DepMissing, msg);
         }
+        let inventory = self.output_inventory();
+        let name = match resolve_fullscreen_output(
+            output_override,
+            self.config.fullscreen_output_override(),
+            &inventory,
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                self.last_error = Some(e.clone());
+                return CommandResult::err(MachineCode::Invalid, e);
+            }
+        };
         let audio = audio.unwrap_or(self.config.audio_default);
         self.notify_start = notify_start;
         self.last_error = None;
-        self.spawn_recorder(None, audio)
+        self.capture_output = Some(name.clone());
+        self.spawn_recorder(None, audio, Some(name))
     }
 
     /// Stop if selecting or recording; idle no-op success; Stopping is idempotent.
@@ -490,15 +537,22 @@ where
                 warnings: Vec::new(),
             };
         }
-        self.spawn_recorder(Some(geom), self.pending_audio)
+        self.capture_output = None;
+        self.spawn_recorder(Some(geom), self.pending_audio, None)
     }
 
-    fn spawn_recorder(&mut self, geometry: Option<String>, audio: bool) -> CommandResult {
+    fn spawn_recorder(
+        &mut self,
+        geometry: Option<String>,
+        audio: bool,
+        fullscreen_output: Option<String>,
+    ) -> CommandResult {
         self.state = State::Starting;
         self.audio = audio;
 
         if let Err(e) = ensure_output_dir(&self.config.output_dir) {
             self.state = State::Idle;
+            self.capture_output = None;
             let msg = format!("cannot create output_dir: {e}");
             self.last_error = Some(msg.clone());
             return CommandResult::err(MachineCode::IoError, msg);
@@ -511,13 +565,34 @@ where
             ),
             Err(e) => {
                 self.state = State::Idle;
+                self.capture_output = None;
                 let msg = format!("cannot allocate output path: {e}");
                 self.last_error = Some(msg.clone());
                 return CommandResult::err(MachineCode::IoError, msg);
             }
         };
 
-        let argv = build_wf_recorder_argv(geometry.as_deref(), audio, &path);
+        // Fullscreen must always pass `-o` (never bare argv). Region uses `-g` only.
+        if geometry.is_none() {
+            let name = fullscreen_output
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if name.is_none() {
+                self.state = State::Idle;
+                self.capture_output = None;
+                let msg = "internal: fullscreen spawn without resolved output".to_string();
+                self.last_error = Some(msg.clone());
+                return CommandResult::err(MachineCode::Invalid, msg);
+            }
+        }
+
+        let argv = build_wf_recorder_argv(
+            geometry.as_deref(),
+            audio,
+            &path,
+            fullscreen_output.as_deref(),
+        );
         let opts = SpawnOpts {
             new_process_group: true,
         };
@@ -528,14 +603,26 @@ where
                 self.output_path = Some(path);
                 self.started_at = Some(self.clock.now());
                 self.state = State::Recording;
+                // Immediate fail (interactive output prompt, bad `-o`, etc.): surface
+                // as start failure instead of a brief "Recording…" then toast.
+                self.clock.sleep(Duration::from_millis(200));
+                if let Some(early) = self.poll_recorder_exited() {
+                    return early;
+                }
                 self.maybe_notify_start();
-                CommandResult::ok_msg("recording started")
+                let msg = if let Some(ref o) = self.capture_output {
+                    format!("Recording {o}")
+                } else {
+                    "recording started".to_string()
+                };
+                CommandResult::ok_msg(msg)
             }
             Err(e) => {
                 self.state = State::Idle;
                 self.recorder_child = None;
                 self.output_path = None;
                 self.started_at = None;
+                self.capture_output = None;
                 let msg = format!("failed to spawn wf-recorder: {e}");
                 self.last_error = Some(msg.clone());
                 CommandResult::err(MachineCode::SpawnFailed, msg)
@@ -545,7 +632,12 @@ where
 
     fn maybe_notify_start(&mut self) {
         if self.notify_start && self.config.notify && self.config.notify_on_start_cli {
-            let _ = self.notifier.notify("record-ui", "Recording started");
+            let body = if let Some(ref o) = self.capture_output {
+                format!("Recording {o}")
+            } else {
+                "Recording started".to_string()
+            };
+            let _ = self.notifier.notify("record-ui", &body);
         }
     }
 
@@ -571,6 +663,7 @@ where
         self.state = State::Idle;
         self.output_path = None;
         self.started_at = None;
+        self.capture_output = None;
         CommandResult::ok_msg("aborted start (no child)")
     }
 
@@ -637,6 +730,7 @@ where
         self.started_at = None;
         self.recorder_child = None;
         self.stopping_pid = None;
+        self.capture_output = None;
         self.state = State::Idle;
         let mut msg = format!(
             "stop timed out after SIGINT/SIGTERM; nuclear SIGKILL used to reap; file may be corrupt{}",
@@ -670,6 +764,7 @@ where
         self.started_at = None;
         self.recorder_child = None;
         self.stopping_pid = None;
+        self.capture_output = None;
         self.state = State::Idle;
 
         let path = match path {
@@ -779,6 +874,7 @@ where
                     self.output_path = None;
                     self.started_at = None;
                     self.stopping_pid = None;
+                    self.capture_output = None;
                     self.state = State::Idle;
                     return Some(CommandResult::err(MachineCode::IoError, msg));
                 }
@@ -791,6 +887,7 @@ where
                 self.output_path = None;
                 self.started_at = None;
                 self.stopping_pid = None;
+                self.capture_output = None;
                 let msg = "recorder child missing after try_wait".to_string();
                 self.last_error = Some(msg.clone());
                 return Some(CommandResult::err(MachineCode::IoError, msg));
@@ -892,12 +989,80 @@ where
 // Pure helpers
 // ---------------------------------------------------------------------------
 
+/// Pure fullscreen output resolution (inject inventory; no hyprctl in tests).
+///
+/// Chain: request override → config pin → sole inventory name → Err.
+pub fn resolve_fullscreen_output(
+    override_name: Option<&str>,
+    config_pin: Option<&str>,
+    inventory: &[String],
+) -> Result<String, String> {
+    let override_name = override_name.map(str::trim).filter(|s| !s.is_empty());
+    let config_pin = config_pin.map(str::trim).filter(|s| !s.is_empty());
+    let chosen = override_name.or(config_pin);
+
+    if let Some(name) = chosen {
+        if inventory.is_empty() {
+            // Still allow? SPEC: empty inventory → Err. Pin not in inventory also Err.
+            return Err(format!(
+                "cannot resolve Wayland output {name:?}: no outputs discovered \
+                 (is hyprctl/wf-recorder available?). Set fullscreen_output only when \
+                 list-outputs shows names."
+            ));
+        }
+        if inventory.iter().any(|n| n == name) {
+            return Ok(name.to_string());
+        }
+        return Err(format!(
+            "unknown Wayland output {name:?}; known: {}. \
+             Use record-ui list-outputs or set fullscreen_output in \
+             ~/.config/record-ui/config.toml",
+            format_known_outputs(inventory)
+        ));
+    }
+
+    match inventory.len() {
+        0 => Err("cannot resolve Wayland output: no outputs discovered \
+             (hyprctl monitors / wf-recorder -L). Multi-monitor setups need \
+             fullscreen_output in ~/.config/record-ui/config.toml or --output NAME \
+             (record-ui list-outputs)."
+            .to_string()),
+        1 => Ok(inventory[0].clone()),
+        _ => Err(format!(
+            "multi-monitor: set fullscreen_output in ~/.config/record-ui/config.toml \
+             or pass --output NAME (known: {}). See also: record-ui list-outputs",
+            format_known_outputs(inventory)
+        )),
+    }
+}
+
+fn format_known_outputs(inventory: &[String]) -> String {
+    if inventory.is_empty() {
+        "(none)".to_string()
+    } else {
+        inventory.join(", ")
+    }
+}
+
 /// Build argv for wf-recorder (never shell).
-pub fn build_wf_recorder_argv(geometry: Option<&str>, audio: bool, path: &Path) -> Vec<String> {
+///
+/// `output`: Wayland output name for fullscreen (`-o`). Ignored when `geometry`
+/// is set (region already pins the capture area).
+///
+/// Fullscreen production paths must pass a non-empty `output` so `-o` is always present.
+pub fn build_wf_recorder_argv(
+    geometry: Option<&str>,
+    audio: bool,
+    path: &Path,
+    output: Option<&str>,
+) -> Vec<String> {
     let mut argv = vec!["wf-recorder".to_string()];
     if let Some(g) = geometry {
         argv.push("-g".into());
         argv.push(g.to_string());
+    } else if let Some(o) = output.map(str::trim).filter(|s| !s.is_empty()) {
+        argv.push("-o".into());
+        argv.push(o.to_string());
     }
     if audio {
         argv.push("-a".into());
@@ -1016,6 +1181,8 @@ mod tests {
         wait_for_signal: bool,
         /// If set, child is already dead at spawn (for poll unexpected exit).
         already_dead: bool,
+        /// Survive this many `try_wait` calls, then auto-exit (spawn settle uses one).
+        auto_exit_after_try_waits: Option<u32>,
     }
 
     impl Default for FakeChildScript {
@@ -1031,6 +1198,7 @@ mod tests {
                 write_file_on_signal: None,
                 wait_for_signal: false,
                 already_dead: false,
+                auto_exit_after_try_waits: None,
             }
         }
     }
@@ -1050,6 +1218,8 @@ mod tests {
         saw_sigterm: bool,
         saw_kill: bool,
         log: Arc<Mutex<Vec<SignalEvent>>>,
+        auto_exit_after_try_waits: Option<u32>,
+        try_wait_calls: u32,
     }
 
     impl FakeChild {
@@ -1069,6 +1239,8 @@ mod tests {
                 saw_sigterm: false,
                 saw_kill: false,
                 log,
+                auto_exit_after_try_waits: script.auto_exit_after_try_waits,
+                try_wait_calls: 0,
             }
         }
 
@@ -1125,7 +1297,14 @@ mod tests {
         }
 
         fn try_wait(&mut self) -> Result<Option<ExitStatus>, PortError> {
+            self.try_wait_calls = self.try_wait_calls.saturating_add(1);
             if self.alive {
+                if let Some(n) = self.auto_exit_after_try_waits {
+                    if self.try_wait_calls > n {
+                        self.alive = false;
+                        return Ok(Some(self.exit));
+                    }
+                }
                 Ok(None)
             } else {
                 Ok(Some(self.exit))
@@ -1267,6 +1446,7 @@ mod tests {
                 write_file_on_signal: None,
                 wait_for_signal: bin == "wf-recorder",
                 already_dead: false,
+                auto_exit_after_try_waits: None,
             });
             script.pid = pid;
 
@@ -1380,6 +1560,8 @@ mod tests {
                 notify_on_start_cli: true,
                 stop_timeout_ms: 50,
                 stop_term_timeout_ms: 50,
+                // Avoid calling real hyprctl from unit tests.
+                fullscreen_output: Some("TEST-OUT".into()),
             }
         }
     }
@@ -1413,13 +1595,16 @@ mod tests {
         spawner: FakeSpawner,
     ) -> Recorder<FakeSpawner, FakeClock, FakeNotifier, FakeClipboard> {
         let clock = FakeClock::at_secs(TEST_UNIX);
-        Recorder::new(
+        let mut rec = Recorder::new(
             spawner,
             clock,
             FakeNotifier::default(),
             FakeClipboard::default(),
             paths.config(),
-        )
+        );
+        // Inventory must include config pin TEST-OUT; avoid real hyprctl.
+        rec.set_forced_output_inventory(Some(vec!["TEST-OUT".into()]));
+        rec
     }
 
     fn slurp_ok(geom: &str) -> FakeChildScript {
@@ -1530,19 +1715,24 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "-a"));
     }
 
-    /// U4: fullscreen start → no -g
+    /// U4: fullscreen start → no -g; always has -o with non-empty name
     #[test]
     fn u4_fullscreen_no_geometry() {
         let paths = TempPaths::new();
         let spawner = FakeSpawner::new();
         let mut rec = make_recorder(&paths, spawner);
 
-        let r = rec.start_fullscreen(None, true);
+        let r = rec.start_fullscreen(None, true, None);
         assert!(r.ok, "{r:?}");
         assert_eq!(rec.state(), State::Recording);
+        assert!(r.message.contains("TEST-OUT"), "{r:?}");
         let argv = &rec.spawner().wf_spawns()[0].argv;
         assert!(!argv.iter().any(|a| a == "-g"));
         assert!(argv.contains(&"-f".into()));
+        let opos = argv.iter().position(|a| a == "-o").expect("-o required");
+        assert!(!argv[opos + 1].is_empty());
+        assert_eq!(argv[opos + 1], "TEST-OUT");
+        assert_eq!(rec.status().capture_output.as_deref(), Some("TEST-OUT"));
         assert_eq!(rec.spawner().slurp_spawns(), 0);
     }
 
@@ -1883,7 +2073,7 @@ mod tests {
         spawner.missing.push("wf-recorder".into());
         let mut rec = make_recorder(&paths, spawner);
 
-        let r = rec.start_fullscreen(None, true);
+        let r = rec.start_fullscreen(None, true, None);
         assert!(!r.ok);
         assert_eq!(r.code, MachineCode::DepMissing);
         assert_eq!(r.code.exit_code(), 4);
@@ -1978,7 +2168,7 @@ mod tests {
         let paths = TempPaths::new();
         let spawner = FakeSpawner::new();
         let mut rec = make_recorder(&paths, spawner);
-        rec.start_fullscreen(None, false);
+        rec.start_fullscreen(None, false, None);
         assert!(!rec
             .notifier()
             .calls
@@ -2010,22 +2200,29 @@ mod tests {
     fn poll_unexpected_recorder_death_fails() {
         let paths = TempPaths::new();
         let mut spawner = FakeSpawner::new();
-        // Spawn recorder that is already dead with no file.
+        // Survive spawn settle (one try_wait), then die on the next poll — no file.
         spawner.auto_write_on_signal = false;
         spawner.push_script(FakeChildScript {
-            already_dead: true,
-            wait_for_signal: false,
+            already_dead: false,
+            wait_for_signal: true,
             exit: ExitStatus::Code(1),
             write_bytes_on_signal: None,
+            auto_exit_after_try_waits: Some(1),
+            stderr: "encoder exploded".into(),
             ..Default::default()
         });
-        // fullscreen uses auto path; override with script
         let mut rec = make_recorder(&paths, spawner);
-        // Manually: start_fullscreen will pop script for wf-recorder
-        let r = rec.start_fullscreen(None, true);
+        let r = rec.start_fullscreen(None, true, None);
         assert!(r.ok, "{r:?}");
+        assert_eq!(rec.state(), State::Recording);
         let r = rec.poll().expect("dead child");
-        assert!(!r.ok);
+        assert!(!r.ok, "{r:?}");
+        assert!(
+            r.message.contains("missing or empty")
+                || r.message.contains("unexpected")
+                || r.message.contains("encoder"),
+            "{r:?}"
+        );
         assert_eq!(rec.state(), State::Idle);
         assert!(rec.clipboard().texts.is_empty());
     }
@@ -2046,13 +2243,168 @@ mod tests {
     #[test]
     fn build_argv_helpers() {
         let p = Path::new("/tmp/rec.mp4");
-        let a = build_wf_recorder_argv(Some("0,0 10x10"), true, p);
+        let a = build_wf_recorder_argv(Some("0,0 10x10"), true, p, Some("HDMI-A-1"));
         assert_eq!(
             a,
             vec!["wf-recorder", "-g", "0,0 10x10", "-a", "-f", "/tmp/rec.mp4"]
         );
-        let b = build_wf_recorder_argv(None, false, p);
+        let b = build_wf_recorder_argv(None, false, p, None);
         assert_eq!(b, vec!["wf-recorder", "-f", "/tmp/rec.mp4"]);
+        let c = build_wf_recorder_argv(None, true, p, Some("DP-1"));
+        assert_eq!(
+            c,
+            vec!["wf-recorder", "-o", "DP-1", "-a", "-f", "/tmp/rec.mp4"]
+        );
+    }
+
+    #[test]
+    fn fullscreen_respects_config_output_override() {
+        let paths = TempPaths::new();
+        let spawner = FakeSpawner::new();
+        let mut rec = make_recorder(&paths, spawner);
+        rec.set_forced_output_inventory(Some(vec!["OTHER-OUT".into(), "TEST-OUT".into()]));
+        let mut cfg = rec.config().clone();
+        cfg.fullscreen_output = Some("OTHER-OUT".into());
+        rec.set_config(cfg);
+        assert!(rec.start_fullscreen(None, false, None).ok);
+        let argv = rec.spawner().wf_spawns()[0].argv.clone();
+        assert!(
+            argv.windows(2).any(|w| w[0] == "-o" && w[1] == "OTHER-OUT"),
+            "argv={argv:?}"
+        );
+        let _ = rec.stop();
+    }
+
+    #[test]
+    fn fullscreen_cli_override_beats_config() {
+        let paths = TempPaths::new();
+        let spawner = FakeSpawner::new();
+        let mut rec = make_recorder(&paths, spawner);
+        rec.set_forced_output_inventory(Some(vec!["DP-1".into(), "HDMI-A-1".into()]));
+        let mut cfg = rec.config().clone();
+        cfg.fullscreen_output = Some("DP-1".into());
+        rec.set_config(cfg);
+        assert!(rec.start_fullscreen(None, false, Some("HDMI-A-1")).ok);
+        let argv = &rec.spawner().wf_spawns()[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w[0] == "-o" && w[1] == "HDMI-A-1"),
+            "argv={argv:?}"
+        );
+    }
+
+    #[test]
+    fn fullscreen_multi_head_without_pin_fails_no_spawn() {
+        let paths = TempPaths::new();
+        let spawner = FakeSpawner::new();
+        let mut rec = make_recorder(&paths, spawner);
+        rec.set_forced_output_inventory(Some(vec!["DP-1".into(), "HDMI-A-1".into()]));
+        let mut cfg = rec.config().clone();
+        cfg.fullscreen_output = None;
+        rec.set_config(cfg);
+        let r = rec.start_fullscreen(None, false, None);
+        assert!(!r.ok, "{r:?}");
+        assert_eq!(r.code, MachineCode::Invalid);
+        assert!(
+            r.message.contains("DP-1") && r.message.contains("HDMI-A-1"),
+            "{r:?}"
+        );
+        assert!(rec.spawner().wf_spawns().is_empty());
+    }
+
+    #[test]
+    fn fullscreen_empty_inventory_fails_no_spawn() {
+        let paths = TempPaths::new();
+        let spawner = FakeSpawner::new();
+        let mut rec = make_recorder(&paths, spawner);
+        rec.set_forced_output_inventory(Some(vec![]));
+        let mut cfg = rec.config().clone();
+        cfg.fullscreen_output = None;
+        rec.set_config(cfg);
+        let r = rec.start_fullscreen(None, false, None);
+        assert!(!r.ok, "{r:?}");
+        assert_eq!(r.code, MachineCode::Invalid);
+        assert!(rec.spawner().wf_spawns().is_empty());
+    }
+
+    #[test]
+    fn fullscreen_invalid_name_fails_lists_known() {
+        let paths = TempPaths::new();
+        let spawner = FakeSpawner::new();
+        let mut rec = make_recorder(&paths, spawner);
+        rec.set_forced_output_inventory(Some(vec!["DP-1".into()]));
+        let r = rec.start_fullscreen(None, false, Some("NOPE"));
+        assert!(!r.ok, "{r:?}");
+        assert_eq!(r.code, MachineCode::Invalid);
+        assert!(r.message.contains("DP-1"), "{r:?}");
+        assert!(rec.spawner().wf_spawns().is_empty());
+    }
+
+    #[test]
+    fn fullscreen_single_head_no_pin_ok() {
+        let paths = TempPaths::new();
+        let spawner = FakeSpawner::new();
+        let mut rec = make_recorder(&paths, spawner);
+        rec.set_forced_output_inventory(Some(vec!["eDP-1".into()]));
+        let mut cfg = rec.config().clone();
+        cfg.fullscreen_output = None;
+        rec.set_config(cfg);
+        let r = rec.start_fullscreen(None, true, None);
+        assert!(r.ok, "{r:?}");
+        assert!(r.message.contains("eDP-1"), "{r:?}");
+        assert!(
+            rec.notifier().calls.iter().any(|t| t.1.contains("eDP-1")),
+            "notify should mention output: {:?}",
+            rec.notifier().calls
+        );
+        let argv = &rec.spawner().wf_spawns()[0].argv;
+        assert!(
+            argv.windows(2).any(|w| w[0] == "-o" && w[1] == "eDP-1"),
+            "argv={argv:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_fullscreen_output_chain() {
+        let inv = vec!["A".into(), "B".into()];
+        assert_eq!(
+            resolve_fullscreen_output(Some("B"), Some("A"), &inv).unwrap(),
+            "B"
+        );
+        assert_eq!(
+            resolve_fullscreen_output(None, Some("A"), &inv).unwrap(),
+            "A"
+        );
+        assert!(resolve_fullscreen_output(None, None, &inv).is_err());
+        assert_eq!(
+            resolve_fullscreen_output(None, None, &["Solo".into()]).unwrap(),
+            "Solo"
+        );
+        assert!(resolve_fullscreen_output(None, None, &[]).is_err());
+        assert!(resolve_fullscreen_output(Some("Z"), None, &inv).is_err());
+    }
+
+    #[test]
+    fn spawn_early_exit_returns_start_failure() {
+        let paths = TempPaths::new();
+        let mut spawner = FakeSpawner::new();
+        spawner.push_script(FakeChildScript {
+            already_dead: true,
+            wait_for_signal: false,
+            exit: ExitStatus::Code(1),
+            stderr: "Failed to select output, exiting".into(),
+            write_bytes_on_signal: None,
+            ..Default::default()
+        });
+        // Do not auto-override already_dead for wf-recorder — keep script as-is.
+        spawner.auto_write_on_signal = false;
+        let mut rec = make_recorder(&paths, spawner);
+        let r = rec.start_fullscreen(None, false, None);
+        assert!(!r.ok, "{r:?}");
+        assert!(
+            r.message.contains("Failed to select output") || r.message.contains("missing or empty"),
+            "{r:?}"
+        );
+        assert_eq!(rec.state(), State::Idle);
     }
 
     #[test]

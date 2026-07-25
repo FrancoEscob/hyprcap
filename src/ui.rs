@@ -238,15 +238,17 @@ fn worker_main(
                             cmd: IpcCommand::StartRegion,
                             audio: Some(audio),
                             gui: None,
+                            output: None,
                         },
                         epoch,
                     ),
                     WorkerCmd::StartFullscreen { audio, epoch } => (
-                        "start fullscreen",
+                        "start one monitor",
                         IpcRequest {
                             cmd: IpcCommand::StartFullscreen,
                             audio: Some(audio),
                             gui: None,
+                            output: None,
                         },
                         epoch,
                     ),
@@ -467,7 +469,7 @@ fn build_window(
 
     let mode_row = GtkBox::new(Orientation::Horizontal, 8);
     let region_btn = ToggleButton::with_label("Region");
-    let full_btn = ToggleButton::with_label("Fullscreen");
+    let full_btn = ToggleButton::with_label("One monitor");
     region_btn.set_active(true);
     full_btn.set_group(Some(&region_btn));
     region_btn.set_hexpand(true);
@@ -821,10 +823,25 @@ fn apply_msg(msg: UiMsg, view: &Rc<RefCell<ViewState>>, w: &UiWidgets, closed: &
         UiMsg::Subscribed(status) => {
             // Fresh attach / reconnect: re-sync audio from session status.
             view.borrow_mut().audio_from_server = false;
-            apply_status(status, view, w, None);
+            // Surface last failure from a previous session (if any).
+            let note = status.last_error.clone();
+            apply_status(status, view, w, note.as_deref());
         }
         UiMsg::Status(status) => {
-            apply_status(status, view, w, None);
+            // Unexpected wf-recorder death is only reaped server-side; status polls
+            // must surface last_error so the label is not stuck on "Recording…".
+            let prev_busy = view
+                .borrow()
+                .last_status
+                .as_ref()
+                .map(|s| s.state != "Idle")
+                .unwrap_or(false);
+            let note = if status.state == "Idle" && prev_busy {
+                status.last_error.clone()
+            } else {
+                None
+            };
+            apply_status(status, view, w, note.as_deref());
         }
         UiMsg::Info(message) => {
             w.msg_label.set_text(&message);
@@ -926,7 +943,15 @@ fn format_op_message(kind: OpKind, resp: &IpcResponse) -> String {
                 if resp.code == "slurp_cancel" {
                     "Region selection canceled".into()
                 } else if resp.status.state == "Recording" {
-                    "Recording…".into()
+                    if let Some(ref o) = resp.status.capture_output {
+                        format!("Output: {o}")
+                    } else if !resp.message.is_empty()
+                        && resp.message.to_lowercase().contains("recording")
+                    {
+                        resp.message.clone()
+                    } else {
+                        "Recording…".into()
+                    }
                 } else {
                     resp.message.clone()
                 }
@@ -994,8 +1019,13 @@ fn apply_status(
         w.open_folder_btn.set_sensitive(true);
     }
 
+    // Mandatory Output: NAME after one-monitor resolve (status or start message).
     if let Some(m) = message {
         w.msg_label.set_text(m);
+    } else if let Some(ref o) = status.capture_output {
+        if matches!(status.state.as_str(), "Recording" | "Starting" | "Stopping") {
+            w.msg_label.set_text(&format!("Output: {o}"));
+        }
     }
 
     let idle = {

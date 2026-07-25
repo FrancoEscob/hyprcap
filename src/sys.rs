@@ -83,6 +83,459 @@ fn query_xdg_user_dir_videos() -> Option<PathBuf> {
     }
 }
 
+/// One Wayland / Hyprland output from inventory.
+///
+/// Geometry and refresh come from `hyprctl monitors -j` when available.
+/// Names-only fallback (`wf-recorder -L`) leaves layout fields as `None` —
+/// **never invent (0,0)** so layout-true Both cannot false-enable later.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputInfo {
+    pub name: String,
+    /// Compositor layout origin X. `None` when unknown (names-only source).
+    pub x: Option<i32>,
+    /// Compositor layout origin Y. `None` when unknown.
+    pub y: Option<i32>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    /// Refresh rate in Hz (`hyprctl` field `refreshRate`). `None` when unknown.
+    pub refresh: Option<f64>,
+}
+
+impl OutputInfo {
+    /// Names-only entry: no invented layout positions.
+    pub fn names_only(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+            refresh: None,
+        }
+    }
+
+    /// True when layout geometry is known and usable for layout-true compose.
+    ///
+    /// Requires x/y present (either may be 0 — primary origin is valid) and
+    /// positive width/height. Zero/negative dimensions do not count as geometry.
+    pub fn has_geometry(&self) -> bool {
+        matches!(
+            (self.x, self.y, self.width, self.height),
+            (Some(_), Some(_), Some(w), Some(h)) if w > 0 && h > 0
+        )
+    }
+
+    /// Format one CLI / script line for `list-outputs`.
+    ///
+    /// With geometry: `name\tx\ty\twidth\theight\trefresh` (refresh blank if unknown).
+    /// Without: name only (first column still script-friendly).
+    pub fn display_line(&self) -> String {
+        match (self.x, self.y, self.width, self.height) {
+            (Some(x), Some(y), Some(w), Some(h)) if w > 0 && h > 0 => {
+                let refresh = self.refresh.map(format_refresh_hz).unwrap_or_default();
+                format!("{}\t{}\t{}\t{}\t{}\t{}", self.name, x, y, w, h, refresh)
+            }
+            _ => self.name.clone(),
+        }
+    }
+}
+
+/// Compact refresh for CLI (drop trailing `.0` when whole Hz).
+fn format_refresh_hz(r: f64) -> String {
+    if r.fract() == 0.0 && r.is_finite() {
+        format!("{}", r as i64)
+    } else {
+        format!("{r}")
+    }
+}
+
+/// Rich output inventory: name + optional geometry/refresh.
+///
+/// Prefers `hyprctl monitors -j` (layout-true). Falls back to names-only from
+/// `wf-recorder -L` with all geometry/refresh fields `None`.
+pub fn list_output_inventory() -> Vec<OutputInfo> {
+    list_inventory_from_hyprctl().unwrap_or_else(list_inventory_from_wf_recorder)
+}
+
+/// Ordered Wayland output names for fullscreen resolve / callers that only need names.
+///
+/// Derived from [`list_output_inventory`] so resolve paths stay compatible.
+pub fn list_output_names() -> Vec<String> {
+    list_output_inventory()
+        .into_iter()
+        .map(|o| o.name)
+        .collect()
+}
+
+/// Parse `hyprctl monitors -j` → rich inventory (testable pure helper).
+///
+/// Returns `None` on invalid JSON or non-array root. Entries missing `name` are
+/// skipped. Missing geometry fields become `None` (not invented zeros).
+pub fn parse_hyprctl_monitors(json: &str) -> Option<Vec<OutputInfo>> {
+    let monitors: serde_json::Value = serde_json::from_str(json).ok()?;
+    let arr = monitors.as_array()?;
+    let mut out = Vec::new();
+    for m in arr {
+        let Some(name) = m.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let refresh = m
+            .get("refreshRate")
+            .or_else(|| m.get("refresh"))
+            .and_then(json_as_f64);
+        out.push(OutputInfo {
+            name: name.to_string(),
+            x: m.get("x").and_then(json_as_i32),
+            y: m.get("y").and_then(json_as_i32),
+            width: m.get("width").and_then(json_as_i32),
+            height: m.get("height").and_then(json_as_i32),
+            refresh,
+        });
+    }
+    Some(out)
+}
+
+/// Parse `hyprctl monitors -j` array → output names only (compat wrapper).
+pub fn parse_hyprctl_monitor_names(json: &str) -> Option<Vec<String>> {
+    Some(
+        parse_hyprctl_monitors(json)?
+            .into_iter()
+            .map(|o| o.name)
+            .collect(),
+    )
+}
+
+fn json_as_i32(v: &serde_json::Value) -> Option<i32> {
+    if let Some(n) = v.as_i64() {
+        return i32::try_from(n).ok();
+    }
+    if let Some(n) = v.as_u64() {
+        return i32::try_from(n).ok();
+    }
+    // Hyprland usually emits integers; tolerate float dimensions.
+    v.as_f64().and_then(|f| {
+        if f.is_finite() && f >= i32::MIN as f64 && f <= i32::MAX as f64 {
+            Some(f as i32)
+        } else {
+            None
+        }
+    })
+}
+
+fn json_as_f64(v: &serde_json::Value) -> Option<f64> {
+    if let Some(f) = v.as_f64() {
+        return f.is_finite().then_some(f);
+    }
+    if let Some(n) = v.as_i64() {
+        return Some(n as f64);
+    }
+    if let Some(n) = v.as_u64() {
+        return Some(n as f64);
+    }
+    None
+}
+
+fn list_inventory_from_hyprctl() -> Option<Vec<OutputInfo>> {
+    let out = Command::new("hyprctl")
+        .args(["monitors", "-j"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let inv = parse_hyprctl_monitors(&text)?;
+    if inv.is_empty() {
+        None
+    } else {
+        Some(inv)
+    }
+}
+
+fn list_inventory_from_wf_recorder() -> Vec<OutputInfo> {
+    let out = Command::new("wf-recorder")
+        .arg("-L")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok();
+    let Some(out) = out else {
+        return Vec::new();
+    };
+    // Prefer stdout when non-empty (accept even if exit non-zero — list may still
+    // be useful). Fall back to stderr only on success (some builds list there).
+    // Never scrape stderr after a failed exit with empty stdout (error text can
+    // contain the substring "Name:" and would invent fake outputs).
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let text = if !stdout.trim().is_empty() {
+        stdout.into_owned()
+    } else if out.status.success() {
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    } else {
+        return Vec::new();
+    };
+    parse_wf_recorder_list_inventory(&text)
+}
+
+/// Extract all output names from `wf-recorder -L` text (testable).
+pub fn parse_wf_recorder_list_names(text: &str) -> Vec<String> {
+    parse_wf_recorder_list_inventory(text)
+        .into_iter()
+        .map(|o| o.name)
+        .collect()
+}
+
+/// Names-only inventory from `wf-recorder -L` (geometry/refresh always `None`).
+pub fn parse_wf_recorder_list_inventory(text: &str) -> Vec<OutputInfo> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        // "1. Name: HDMI-A-1 Description: ..."
+        if let Some(rest) = line
+            .split_once("Name:")
+            .map(|(_, r)| r.trim())
+            .filter(|r| !r.is_empty())
+        {
+            let name = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !name.is_empty() {
+                out.push(OutputInfo::names_only(name));
+            }
+        }
+    }
+    out
+}
+
+/// First name from `wf-recorder -L` text (compat helper).
+pub fn parse_first_wf_recorder_list_name(text: &str) -> Option<String> {
+    parse_wf_recorder_list_names(text).into_iter().next()
+}
+
+#[cfg(test)]
+mod output_inventory_tests {
+    use super::*;
+
+    /// Fixture shaped like real `hyprctl monitors -j` (geometry + refreshRate).
+    const HYPRCTL_TWO_HEADS: &str = r#"[
+      {
+        "id": 0,
+        "name": "HDMI-A-1",
+        "width": 2560,
+        "height": 1440,
+        "refreshRate": 144.0,
+        "x": 0,
+        "y": 0,
+        "focused": true
+      },
+      {
+        "id": 1,
+        "name": "DP-1",
+        "width": 1920,
+        "height": 1080,
+        "refreshRate": 59.951,
+        "x": 2560,
+        "y": 180,
+        "focused": false
+      }
+    ]"#;
+
+    #[test]
+    fn parse_wf_recorder_list_all_names() {
+        let sample = "\
+1. Name: HDMI-A-1 Description: Foo (HDMI-A-1)
+2. Name: DP-1 Description: Bar (DP-1)
+";
+        assert_eq!(
+            parse_wf_recorder_list_names(sample),
+            vec!["HDMI-A-1".to_string(), "DP-1".to_string()]
+        );
+        assert_eq!(
+            parse_first_wf_recorder_list_name(sample).as_deref(),
+            Some("HDMI-A-1")
+        );
+    }
+
+    #[test]
+    fn parse_wf_recorder_list_empty() {
+        assert!(parse_wf_recorder_list_names("").is_empty());
+        assert!(parse_wf_recorder_list_names("no names here").is_empty());
+        assert_eq!(parse_first_wf_recorder_list_name(""), None);
+    }
+
+    #[test]
+    fn parse_wf_recorder_inventory_has_no_geometry() {
+        let sample = "\
+1. Name: HDMI-A-1 Description: Foo (HDMI-A-1)
+2. Name: DP-1 Description: Bar (DP-1)
+";
+        let inv = parse_wf_recorder_list_inventory(sample);
+        assert_eq!(inv.len(), 2);
+        for o in &inv {
+            assert!(!o.has_geometry(), "must not invent positions: {o:?}");
+            assert!(o.x.is_none());
+            assert!(o.y.is_none());
+            assert!(o.width.is_none());
+            assert!(o.height.is_none());
+            assert!(o.refresh.is_none());
+            // display_line is name-only so scripts using first column still work
+            assert_eq!(o.display_line(), o.name);
+        }
+        assert_eq!(inv[0].name, "HDMI-A-1");
+        assert_eq!(inv[1].name, "DP-1");
+    }
+
+    #[test]
+    fn parse_hyprctl_names() {
+        let sample = r#"[
+          {"name":"DP-1","focused":false},
+          {"name":"HDMI-A-1","focused":true}
+        ]"#;
+        assert_eq!(
+            parse_hyprctl_monitor_names(sample).unwrap(),
+            vec!["DP-1".to_string(), "HDMI-A-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_hyprctl_monitors_geometry_and_refresh() {
+        let inv = parse_hyprctl_monitors(HYPRCTL_TWO_HEADS).expect("parse ok");
+        assert_eq!(inv.len(), 2);
+
+        let a = &inv[0];
+        assert_eq!(a.name, "HDMI-A-1");
+        assert_eq!(a.x, Some(0));
+        assert_eq!(a.y, Some(0));
+        assert_eq!(a.width, Some(2560));
+        assert_eq!(a.height, Some(1440));
+        assert_eq!(a.refresh, Some(144.0));
+        assert!(a.has_geometry());
+        assert_eq!(a.display_line(), "HDMI-A-1\t0\t0\t2560\t1440\t144");
+
+        let b = &inv[1];
+        assert_eq!(b.name, "DP-1");
+        assert_eq!(b.x, Some(2560));
+        assert_eq!(b.y, Some(180));
+        assert_eq!(b.width, Some(1920));
+        assert_eq!(b.height, Some(1080));
+        assert!((b.refresh.unwrap() - 59.951).abs() < 1e-9);
+        assert_eq!(b.display_line(), "DP-1\t2560\t180\t1920\t1080\t59.951");
+    }
+
+    #[test]
+    fn parse_hyprctl_accepts_refresh_alias() {
+        let sample = r#"[{"name":"eDP-1","x":0,"y":0,"width":1920,"height":1080,"refresh":60.0}]"#;
+        let inv = parse_hyprctl_monitors(sample).unwrap();
+        assert_eq!(inv[0].refresh, Some(60.0));
+    }
+
+    #[test]
+    fn parse_hyprctl_invalid_json_and_empty() {
+        assert!(parse_hyprctl_monitors("not-json").is_none());
+        assert!(parse_hyprctl_monitors("{}").is_none()); // object, not array
+        assert_eq!(parse_hyprctl_monitors("[]").unwrap().len(), 0);
+        assert!(parse_hyprctl_monitor_names("not-json").is_none());
+    }
+
+    #[test]
+    fn parse_hyprctl_skips_missing_or_empty_name() {
+        let sample = r#"[
+          {"x":0,"y":0,"width":1,"height":1},
+          {"name":"","width":1},
+          {"name":"  "},
+          {"name":"OK","width":800,"height":600,"x":10,"y":20,"refreshRate":60}
+        ]"#;
+        let inv = parse_hyprctl_monitors(sample).unwrap();
+        assert_eq!(inv.len(), 1);
+        assert_eq!(inv[0].name, "OK");
+        assert_eq!(inv[0].x, Some(10));
+        assert_eq!(inv[0].width, Some(800));
+    }
+
+    #[test]
+    fn parse_hyprctl_partial_geometry_not_has_geometry() {
+        // Missing y — do not invent; has_geometry false for layout-true gates later.
+        let sample = r#"[{"name":"A","x":0,"width":100,"height":100,"refreshRate":60}]"#;
+        let inv = parse_hyprctl_monitors(sample).unwrap();
+        assert_eq!(inv[0].x, Some(0));
+        assert!(inv[0].y.is_none());
+        assert!(!inv[0].has_geometry());
+        // Partial → name-only CLI line (no fake zeros for missing fields).
+        assert_eq!(inv[0].display_line(), "A");
+    }
+
+    #[test]
+    fn display_line_geometry_without_refresh_blank_sixth_field() {
+        // Full geometry present, no refreshRate/refresh → still TSV with blank refresh.
+        let sample = r#"[{"name":"eDP-1","x":0,"y":0,"width":1920,"height":1080}]"#;
+        let inv = parse_hyprctl_monitors(sample).unwrap();
+        assert_eq!(inv.len(), 1);
+        assert!(inv[0].has_geometry());
+        assert!(inv[0].refresh.is_none());
+        assert_eq!(inv[0].display_line(), "eDP-1\t0\t0\t1920\t1080\t");
+    }
+
+    #[test]
+    fn has_geometry_requires_positive_dimensions() {
+        // x/y may be 0 (primary origin). width/height must be > 0.
+        let ok = OutputInfo {
+            name: "A".into(),
+            x: Some(0),
+            y: Some(0),
+            width: Some(1920),
+            height: Some(1080),
+            refresh: None,
+        };
+        assert!(ok.has_geometry());
+
+        let zero_w = OutputInfo {
+            width: Some(0),
+            ..ok.clone()
+        };
+        assert!(!zero_w.has_geometry());
+        assert_eq!(zero_w.display_line(), "A");
+
+        let zero_h = OutputInfo {
+            height: Some(0),
+            ..ok.clone()
+        };
+        assert!(!zero_h.has_geometry());
+
+        let neg = OutputInfo {
+            width: Some(-1),
+            height: Some(100),
+            ..ok
+        };
+        assert!(!neg.has_geometry());
+    }
+
+    #[test]
+    fn names_only_constructor_never_invents_layout() {
+        let o = OutputInfo::names_only("HDMI-A-1");
+        assert!(!o.has_geometry());
+        assert_eq!(
+            o,
+            OutputInfo {
+                name: "HDMI-A-1".into(),
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                refresh: None,
+            }
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Clock
 // ---------------------------------------------------------------------------

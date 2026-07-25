@@ -34,6 +34,9 @@ pub struct IpcRequest {
     /// as a GUI view until disconnect (idle-exit / notify-on-start policy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gui: Option<bool>,
+    /// Optional Wayland output for `StartFullscreen` (`wf-recorder -o`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 impl IpcRequest {
@@ -42,6 +45,7 @@ impl IpcRequest {
             cmd: IpcCommand::Ping,
             audio: None,
             gui: None,
+            output: None,
         }
     }
 
@@ -50,6 +54,7 @@ impl IpcRequest {
             cmd: IpcCommand::Status,
             audio: None,
             gui: None,
+            output: None,
         }
     }
 
@@ -58,14 +63,16 @@ impl IpcRequest {
             cmd: IpcCommand::StartRegion,
             audio,
             gui: None,
+            output: None,
         }
     }
 
-    pub fn start_fullscreen(audio: Option<bool>) -> Self {
+    pub fn start_fullscreen(audio: Option<bool>, output: Option<String>) -> Self {
         Self {
             cmd: IpcCommand::StartFullscreen,
             audio,
             gui: None,
+            output,
         }
     }
 
@@ -74,6 +81,7 @@ impl IpcRequest {
             cmd: IpcCommand::Stop,
             audio: None,
             gui: None,
+            output: None,
         }
     }
 
@@ -82,6 +90,7 @@ impl IpcRequest {
             cmd: IpcCommand::ToggleRegion,
             audio,
             gui: None,
+            output: None,
         }
     }
 
@@ -90,6 +99,7 @@ impl IpcRequest {
             cmd: IpcCommand::Shutdown,
             audio: None,
             gui: None,
+            output: None,
         }
     }
 
@@ -99,6 +109,7 @@ impl IpcRequest {
             cmd: IpcCommand::Subscribe,
             audio: None,
             gui: Some(true),
+            output: None,
         }
     }
 }
@@ -114,6 +125,9 @@ pub struct IpcStatus {
     pub last_error: Option<String>,
     pub last_success_path: Option<String>,
     pub elapsed_ms: Option<u64>,
+    /// Resolved one-monitor output name while Starting/Recording/Stopping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_output: Option<String>,
 }
 
 impl From<&Status> for IpcStatus {
@@ -130,6 +144,7 @@ impl From<&Status> for IpcStatus {
                 .as_ref()
                 .map(|p| p.display().to_string()),
             elapsed_ms: s.elapsed_ms,
+            capture_output: s.capture_output.clone(),
         }
     }
 }
@@ -244,6 +259,7 @@ mod tests {
             last_error: None,
             last_success_path: None,
             elapsed_ms: None,
+            capture_output: None,
         };
         let cases = [
             (MachineCode::Ok, 0),

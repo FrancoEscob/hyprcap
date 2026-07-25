@@ -26,6 +26,11 @@ pub struct Config {
     pub stop_timeout_ms: u64,
     /// Wait after SIGTERM before hard failure / nuclear.
     pub stop_term_timeout_ms: u64,
+    /// Wayland output for one-monitor fullscreen (`wf-recorder -o`).
+    /// Required when more than one output is present (no multi-head focus auto-pick).
+    /// Empty/None: sole output if inventory length is 1; else start fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fullscreen_output: Option<String>,
 }
 
 impl Default for Config {
@@ -44,6 +49,7 @@ impl Default for Config {
             notify_on_start_cli: true,
             stop_timeout_ms: 5000,
             stop_term_timeout_ms: 2000,
+            fullscreen_output: None,
         }
     }
 }
@@ -79,7 +85,16 @@ impl Config {
             notify_on_start_cli: true,
             stop_timeout_ms: 5000,
             stop_term_timeout_ms: 2000,
+            fullscreen_output: None,
         }
+    }
+
+    /// Effective fullscreen `-o` override, if configured non-empty.
+    pub fn fullscreen_output_override(&self) -> Option<&str> {
+        self.fullscreen_output
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 
     /// Load TOML from `path`. Missing file → defaults. Partial TOML merges over defaults.
@@ -139,6 +154,7 @@ struct PartialConfig {
     notify_on_start_cli: Option<bool>,
     stop_timeout_ms: Option<u64>,
     stop_term_timeout_ms: Option<u64>,
+    fullscreen_output: Option<String>,
 }
 
 impl PartialConfig {
@@ -163,6 +179,9 @@ impl PartialConfig {
         }
         if let Some(v) = self.stop_term_timeout_ms {
             base.stop_term_timeout_ms = v;
+        }
+        if let Some(v) = self.fullscreen_output {
+            base.fullscreen_output = Some(v);
         }
         base
     }
