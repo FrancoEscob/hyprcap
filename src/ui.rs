@@ -24,9 +24,10 @@ use gtk4::{
 };
 use libadwaita as adw;
 use libadwaita::prelude::*;
+use hyprcap::audio::{AudioInventory, AudioPlan, SystemAudioMode};
 use hyprcap::client::{self, ClientError};
 use hyprcap::config::Config;
-use hyprcap::ipc::{IpcCommand, IpcRequest, IpcResponse, IpcStatus};
+use hyprcap::ipc::{IpcRequest, IpcResponse, IpcStatus};
 use hyprcap::server::{self, RuntimePaths};
 use hyprcap::sys::{self, EnvPaths, OutputInfo};
 
@@ -81,12 +82,13 @@ pub fn run_gui() -> i32 {
 
 enum WorkerCmd {
     PollStatus,
+    ListAudio,
     StartRegion {
-        audio: bool,
+        plan: hyprcap::audio::AudioPlan,
         epoch: u64,
     },
     StartFullscreen {
-        audio: bool,
+        plan: hyprcap::audio::AudioPlan,
         epoch: u64,
         /// Wayland output name for `-o` (required when multi-head).
         output: Option<String>,
@@ -95,7 +97,7 @@ enum WorkerCmd {
     },
     /// Dual-monitor Both session (exactly 2 heads + ffmpeg; layout on server).
     StartBoth {
-        audio: bool,
+        plan: hyprcap::audio::AudioPlan,
         epoch: u64,
     },
     Stop,
@@ -127,6 +129,8 @@ enum UiMsg {
     Subscribed(IpcStatus),
     /// Subscribe could not be established — close the view.
     SubscribeFailed(String),
+    /// Pulse/PipeWire inventory for audio pickers.
+    AudioList(IpcResponse),
 }
 
 #[derive(Clone, Copy)]
@@ -198,6 +202,7 @@ fn worker_main(
 
         let mut shutdown = false;
         let mut want_stop = false;
+        let mut want_list_audio = false;
         let mut starts: Vec<WorkerCmd> = Vec::new();
         let mut want_poll = false;
 
@@ -206,6 +211,7 @@ fn worker_main(
                 WorkerCmd::ShutdownWorker => shutdown = true,
                 WorkerCmd::Stop => want_stop = true,
                 WorkerCmd::PollStatus => want_poll = true,
+                WorkerCmd::ListAudio => want_list_audio = true,
                 s @ WorkerCmd::StartRegion { .. }
                 | s @ WorkerCmd::StartFullscreen { .. }
                 | s @ WorkerCmd::StartBoth { .. } => {
@@ -247,6 +253,22 @@ fn worker_main(
             }
         }
 
+        if want_list_audio {
+            match client::request(&socket, &IpcRequest::list_audio()) {
+                Ok(resp) => {
+                    connect_fail_streak = 0;
+                    let _ = ui_tx.send(UiMsg::AudioList(resp));
+                }
+                Err(e) => {
+                    let _ = ui_tx.send(UiMsg::Error {
+                        source: ErrorSource::Status,
+                        message: format!("list audio: {e}"),
+                        epoch: 0,
+                    });
+                }
+            }
+        }
+
         // Long starts on dedicated threads so Stop/status stay responsive.
         for start in starts {
             let sock = socket.clone();
@@ -254,35 +276,23 @@ fn worker_main(
             let sd = Arc::clone(&shutting_down);
             let handle = thread::spawn(move || {
                 let (kind_label, req, epoch) = match start {
-                    WorkerCmd::StartRegion { audio, epoch } => (
+                    WorkerCmd::StartRegion { plan, epoch } => (
                         "start region",
-                        IpcRequest {
-                            cmd: IpcCommand::StartRegion,
-                            audio: Some(audio),
-                            gui: None,
-                            output: None,
-                            fps: None,
-                        },
+                        IpcRequest::start_region_plan(plan),
                         epoch,
                     ),
                     WorkerCmd::StartFullscreen {
-                        audio,
+                        plan,
                         epoch,
                         output,
                         fps,
                     } => (
                         "start one monitor",
-                        IpcRequest {
-                            cmd: IpcCommand::StartFullscreen,
-                            audio: Some(audio),
-                            gui: None,
-                            output,
-                            fps,
-                        },
+                        IpcRequest::start_fullscreen_plan(plan, output, fps),
                         epoch,
                     ),
-                    WorkerCmd::StartBoth { audio, epoch } => {
-                        ("start both", IpcRequest::start_both(Some(audio)), epoch)
+                    WorkerCmd::StartBoth { plan, epoch } => {
+                        ("start both", IpcRequest::start_both_plan(plan), epoch)
                     }
                     _ => return,
                 };
@@ -518,8 +528,8 @@ fn build_window(
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Hyprcap")
-        .default_width(320)
-        .default_height(320)
+        .default_width(340)
+        .default_height(420)
         .resizable(true)
         .build();
 
@@ -552,6 +562,7 @@ fn build_window(
     // One-monitor pickers (sensitive only when mode = One monitor).
     let env_paths = EnvPaths::from_env();
     let loaded_cfg = Config::load(&env_paths).unwrap_or_else(|_| Config::with_defaults(&env_paths));
+    let sticky_cfg = Rc::new(RefCell::new(loaded_cfg.clone()));
     let inventory = sys::list_output_inventory();
     // Both enablement: exactly 2 heads + ffmpeg on PATH (DUAL-MONITOR §5.2).
     // Revalidated on idle status and on Record when Both is selected (hotplug).
@@ -594,11 +605,69 @@ fn build_window(
     fps_dd.set_sensitive(false);
     root.append(&fps_dd);
 
-    let audio_check = CheckButton::with_label("System audio");
-    audio_check.set_active(false);
-    // Both uses primary-only `-a`; one track is intentional (DUAL-MONITOR §5.5).
-    audio_check.set_tooltip_text(Some("One desktop audio track (not per monitor)."));
-    root.append(&audio_check);
+    // --- Audio matrix: system (off/all/app) + optional mic ---
+    let sys_audio_label = Label::new(Some("System sound"));
+    sys_audio_label.set_halign(Align::Start);
+    sys_audio_label.add_css_class("dim-label");
+    root.append(&sys_audio_label);
+
+    let system_mode_dd = DropDown::from_strings(&["Off", "All PC sound", "One app"]);
+    let cfg_plan = sticky_cfg.borrow().audio_plan();
+    system_mode_dd.set_selected(match cfg_plan.system {
+        SystemAudioMode::Off => 0,
+        SystemAudioMode::All => 1,
+        SystemAudioMode::App => 2,
+    });
+    system_mode_dd.set_tooltip_text(Some(
+        "All PC = everything on the selected output. App = one playing application. Mixed with mic into one track.",
+    ));
+    root.append(&system_mode_dd);
+
+    let system_detail_dd = DropDown::from_strings(&["Default output"]);
+    system_detail_dd.set_tooltip_text(Some("Output device (All) or playing app (App mode)."));
+    root.append(&system_detail_dd);
+
+    let mic_check = CheckButton::with_label("Microphone");
+    mic_check.set_active(cfg_plan.mic);
+    mic_check.set_tooltip_text(Some("Mix mic into the same audio track as system sound."));
+    root.append(&mic_check);
+
+    let mic_dd = DropDown::from_strings(&["Default mic"]);
+    mic_dd.set_sensitive(cfg_plan.mic);
+    root.append(&mic_dd);
+
+    let audio_inv: Rc<RefCell<AudioInventory>> = Rc::new(RefCell::new(AudioInventory::default()));
+    // Seed inventory once (best-effort); refresh via ListAudio after attach.
+    if let Ok(inv) = hyprcap::audio::list_audio_inventory() {
+        *audio_inv.borrow_mut() = inv;
+    }
+    populate_audio_dropdowns(
+        &system_mode_dd,
+        &system_detail_dd,
+        &mic_dd,
+        &audio_inv.borrow(),
+        &sticky_cfg.borrow().audio_plan(),
+    );
+
+    // Rebuild detail list when system mode changes; toggle mic device sensitivity.
+    {
+        let system_detail_dd2 = system_detail_dd.clone();
+        let mic_dd2 = mic_dd.clone();
+        let mic_check2 = mic_check.clone();
+        let audio_inv2 = Rc::clone(&audio_inv);
+        let sticky_cfg2 = Rc::clone(&sticky_cfg);
+        system_mode_dd.connect_selected_notify(move |dd| {
+            let plan = sticky_cfg2.borrow().audio_plan();
+            populate_audio_dropdowns(dd, &system_detail_dd2, &mic_dd2, &audio_inv2.borrow(), &plan);
+            let mode = dd.selected();
+            system_detail_dd2.set_sensitive(mode == 1 || mode == 2);
+            mic_dd2.set_sensitive(mic_check2.is_active());
+        });
+        let mic_dd3 = mic_dd.clone();
+        mic_check.connect_toggled(move |c| {
+            mic_dd3.set_sensitive(c.is_active());
+        });
+    }
 
     let primary = Button::with_label("Record");
     primary.add_css_class("suggested-action");
@@ -810,7 +879,12 @@ fn build_window(
         let both_btn = both_btn.clone();
         let monitor_dd = monitor_dd.clone();
         let fps_dd = fps_dd.clone();
-        let audio_check = audio_check.clone();
+        let system_mode_dd = system_mode_dd.clone();
+        let system_detail_dd = system_detail_dd.clone();
+        let mic_check = mic_check.clone();
+        let mic_dd = mic_dd.clone();
+        let audio_inv = Rc::clone(&audio_inv);
+        let sticky_cfg = Rc::clone(&sticky_cfg);
         let view = Rc::clone(&view);
         let picker = Rc::clone(&picker);
         let msg_label = msg_label.clone();
@@ -886,7 +960,24 @@ fn build_window(
             if start_in_flight {
                 return;
             }
-            let audio = audio_check.is_active();
+            let plan = plan_from_audio_widgets(
+                &system_mode_dd,
+                &system_detail_dd,
+                &mic_check,
+                &mic_dd,
+                &audio_inv.borrow(),
+            );
+            if plan.system == SystemAudioMode::App && plan.app.is_none() {
+                msg_label.set_text("No app selected — start playback or pick All PC sound");
+                return;
+            }
+            // Sticky config for next session.
+            {
+                let mut cfg = sticky_cfg.borrow_mut();
+                cfg.apply_audio_plan(&plan);
+                let paths = EnvPaths::from_env();
+                let _ = cfg.save(&paths);
+            }
             let region = region_btn.is_active();
             let one = full_btn.is_active();
             let both = both_mode;
@@ -910,16 +1001,22 @@ fn build_window(
             }
             let epoch = start_epoch_counter.fetch_add(1, Ordering::SeqCst) + 1;
             let cmd = if region {
-                WorkerCmd::StartRegion { audio, epoch }
+                WorkerCmd::StartRegion {
+                    plan: plan.clone(),
+                    epoch,
+                }
             } else if both {
-                WorkerCmd::StartBoth { audio, epoch }
+                WorkerCmd::StartBoth {
+                    plan: plan.clone(),
+                    epoch,
+                }
             } else {
                 let p = picker.borrow();
                 let output = p.selected_output_name().map(|s| s.to_string());
                 // Explicit fps for this start: Some(0) = Auto so config cannot override.
                 let fps = ipc_fps_for_start(p.selected_fps_value());
                 WorkerCmd::StartFullscreen {
-                    audio,
+                    plan: plan.clone(),
                     epoch,
                     output,
                     fps,
@@ -938,7 +1035,10 @@ fn build_window(
                     both_btn.set_sensitive(false);
                     monitor_dd.set_sensitive(false);
                     fps_dd.set_sensitive(false);
-                    audio_check.set_sensitive(false);
+                    system_mode_dd.set_sensitive(false);
+                    system_detail_dd.set_sensitive(false);
+                    mic_check.set_sensitive(false);
+                    mic_dd.set_sensitive(false);
                     if region {
                         msg_label.set_text("Select a region…");
                         // Best-effort: get out of the way of slurp focus.
@@ -1067,9 +1167,18 @@ fn build_window(
             both_eligible: Rc::clone(&both_eligible),
             monitor_dd,
             fps_dd,
-            audio_check,
+            system_mode_dd: system_mode_dd.clone(),
+            system_detail_dd: system_detail_dd.clone(),
+            mic_check: mic_check.clone(),
+            mic_dd: mic_dd.clone(),
+            audio_inv: Rc::clone(&audio_inv),
+            sticky_cfg: Rc::clone(&sticky_cfg),
             window: window_weak,
         };
+        // Refresh sinks/apps/mics from session server.
+        if let Some(ref wh) = *worker.borrow() {
+            let _ = wh.tx.send(WorkerCmd::ListAudio);
+        }
         let id = glib::timeout_add_local(Duration::from_millis(50), move || {
             if closed.get() {
                 return glib::ControlFlow::Break;
@@ -1154,7 +1263,12 @@ struct UiWidgets {
     both_eligible: Rc<Cell<bool>>,
     monitor_dd: DropDown,
     fps_dd: DropDown,
-    audio_check: CheckButton,
+    system_mode_dd: DropDown,
+    system_detail_dd: DropDown,
+    mic_check: CheckButton,
+    mic_dd: DropDown,
+    audio_inv: Rc<RefCell<AudioInventory>>,
+    sticky_cfg: Rc<RefCell<Config>>,
     window: glib::object::WeakRef<adw::ApplicationWindow>,
 }
 
@@ -1169,6 +1283,32 @@ fn apply_msg(msg: UiMsg, view: &Rc<RefCell<ViewState>>, w: &UiWidgets, closed: &
             // Surface last failure from a previous session (if any).
             let note = status.last_error.clone();
             apply_status(status, view, w, note.as_deref());
+        }
+        UiMsg::AudioList(resp) => {
+            if let Some(inv) = resp.audio_list {
+                *w.audio_inv.borrow_mut() = inv;
+            } else if !resp.ok {
+                w.msg_label
+                    .set_text(&format!("Audio devices: {}", resp.message));
+            }
+            let plan = w.sticky_cfg.borrow().audio_plan();
+            populate_audio_dropdowns(
+                &w.system_mode_dd,
+                &w.system_detail_dd,
+                &w.mic_dd,
+                &w.audio_inv.borrow(),
+                &plan,
+            );
+            let idle = {
+                let v = view.borrow();
+                v.last_status
+                    .as_ref()
+                    .map(|s| s.state == "Idle")
+                    .unwrap_or(true)
+                    && !v.start_in_flight
+                    && !v.stop_in_flight
+            };
+            set_audio_controls_sensitive(w, idle);
         }
         UiMsg::Status(status) => {
             // Unexpected wf-recorder death is only reaped server-side; status polls
@@ -1390,9 +1530,8 @@ fn apply_status(
         if let Some(ref p) = status.last_success_path {
             v.last_path = Some(p.clone());
         }
-        // Sync audio from server on first status / mid-recording attach.
+        // First attach: keep GUI sticky config; do not force-toggle from bool status.audio.
         if !v.audio_from_server {
-            w.audio_check.set_active(status.audio);
             v.audio_from_server = true;
         }
         v.last_status = Some(status.clone());
@@ -1448,13 +1587,174 @@ fn apply_status(
     } else {
         w.both_btn.set_sensitive(false);
     }
-    w.audio_check.set_sensitive(idle);
+    set_audio_controls_sensitive(w, idle);
     // Monitor / FPS lists only when mode = One monitor (not Region / Both).
     let one = w.full_btn.is_active();
     w.monitor_dd.set_sensitive(idle && one);
     w.fps_dd.set_sensitive(idle && one);
 
     refresh_primary_from_view(view, &w.primary);
+}
+
+fn set_audio_controls_sensitive(w: &UiWidgets, idle: bool) {
+    w.system_mode_dd.set_sensitive(idle);
+    let mode = w.system_mode_dd.selected();
+    w.system_detail_dd
+        .set_sensitive(idle && (mode == 1 || mode == 2));
+    w.mic_check.set_sensitive(idle);
+    w.mic_dd.set_sensitive(idle && w.mic_check.is_active());
+}
+
+/// Rebuild detail / mic dropdown models from inventory + preferred plan.
+fn populate_audio_dropdowns(
+    system_mode_dd: &DropDown,
+    system_detail_dd: &DropDown,
+    mic_dd: &DropDown,
+    inv: &AudioInventory,
+    plan: &AudioPlan,
+) {
+    let mode = system_mode_dd.selected();
+    // Detail list: sinks (All) or apps (App) or placeholder (Off).
+    let detail_labels: Vec<String> = match mode {
+        1 => {
+            let mut v = vec!["Default output".to_string()];
+            for s in &inv.sinks {
+                let mark = if s.is_default { " ★" } else { "" };
+                v.push(format!("{}{mark}", s.description));
+            }
+            if inv.sinks.is_empty() {
+                v = vec!["Default output".into()];
+            }
+            v
+        }
+        2 => {
+            if inv.apps.is_empty() {
+                vec!["(no apps playing)".into()]
+            } else {
+                inv.apps
+                    .iter()
+                    .map(|a| {
+                        if let Some(ref m) = a.media_name {
+                            format!("{} — {m}", a.name)
+                        } else {
+                            a.name.clone()
+                        }
+                    })
+                    .collect()
+            }
+        }
+        _ => vec!["—".into()],
+    };
+    let detail_list = StringList::new(&detail_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    system_detail_dd.set_model(Some(&detail_list));
+    // Restore selection preference.
+    let sel = match mode {
+        1 => {
+            if let Some(ref want) = plan.sink {
+                inv.sinks
+                    .iter()
+                    .position(|s| &s.name == want)
+                    .map(|i| (i + 1) as u32) // +1 for Default row
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        }
+        2 => {
+            if let Some(ref want) = plan.app {
+                inv.apps
+                    .iter()
+                    .position(|a| a.name.eq_ignore_ascii_case(want))
+                    .unwrap_or(0) as u32
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
+    if !detail_labels.is_empty() {
+        system_detail_dd.set_selected(sel.min((detail_labels.len() - 1) as u32));
+    }
+    system_detail_dd.set_sensitive(mode == 1 || mode == 2);
+
+    let mic_labels: Vec<String> = {
+        let mics: Vec<_> = inv.mics().collect();
+        if mics.is_empty() {
+            vec!["Default mic".into()]
+        } else {
+            let mut v = vec!["Default mic".to_string()];
+            for m in mics {
+                let mark = if m.is_default { " ★" } else { "" };
+                v.push(format!("{}{mark}", m.description));
+            }
+            v
+        }
+    };
+    let mic_list = StringList::new(&mic_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    mic_dd.set_model(Some(&mic_list));
+    let mic_sel = if let Some(ref want) = plan.mic_device {
+        inv.mics()
+            .position(|m| &m.name == want)
+            .map(|i| (i + 1) as u32)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    if !mic_labels.is_empty() {
+        mic_dd.set_selected(mic_sel.min((mic_labels.len() - 1) as u32));
+    }
+}
+
+fn plan_from_audio_widgets(
+    system_mode_dd: &DropDown,
+    system_detail_dd: &DropDown,
+    mic_check: &CheckButton,
+    mic_dd: &DropDown,
+    inv: &AudioInventory,
+) -> AudioPlan {
+    let system = match system_mode_dd.selected() {
+        1 => SystemAudioMode::All,
+        2 => SystemAudioMode::App,
+        _ => SystemAudioMode::Off,
+    };
+    let mut sink = None;
+    let mut app = None;
+    match system {
+        SystemAudioMode::All => {
+            let idx = system_detail_dd.selected() as usize;
+            if idx >= 1 {
+                if let Some(s) = inv.sinks.get(idx - 1) {
+                    sink = Some(s.name.clone());
+                }
+            }
+        }
+        SystemAudioMode::App => {
+            let idx = system_detail_dd.selected() as usize;
+            if let Some(a) = inv.apps.get(idx) {
+                app = Some(a.name.clone());
+            }
+        }
+        SystemAudioMode::Off => {}
+    }
+    let mic = mic_check.is_active();
+    let mic_device = if mic {
+        let idx = mic_dd.selected() as usize;
+        if idx >= 1 {
+            inv.mics().nth(idx - 1).map(|m| m.name.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    AudioPlan {
+        system,
+        sink,
+        app,
+        mic,
+        mic_device,
+    }
+    .normalized()
 }
 
 fn refresh_primary_from_view(view: &Rc<RefCell<ViewState>>, primary: &Button) {

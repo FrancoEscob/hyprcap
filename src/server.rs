@@ -341,15 +341,64 @@ where
     Cl: Clipboard,
 {
     let notify_start = gui_clients == 0;
+    if req.cmd == IpcCommand::ListAudio {
+        let status = recorder.status();
+        let response = match crate::audio::list_audio_inventory() {
+            Ok(inv) => IpcResponse::audio_list(inv, &status),
+            Err(e) => IpcResponse::err(MachineCode::DepMissing, e.to_string(), &status),
+        };
+        return HandleOutcome {
+            response,
+            want_shutdown: false,
+        };
+    }
+
+    let plan = req.resolved_audio_plan(recorder.config());
     let (result, want_shutdown) = match req.cmd {
         IpcCommand::Ping => (CommandResult::ok_msg("pong"), false),
         IpcCommand::Status => (CommandResult::ok_msg("status"), false),
-        IpcCommand::StartRegion => (recorder.start_region(req.audio, notify_start), false),
-        IpcCommand::StartFullscreen => (
-            recorder.start_fullscreen(req.audio, notify_start, req.output.as_deref(), req.fps),
-            false,
-        ),
-        IpcCommand::StartBoth => (recorder.start_both(req.audio, notify_start), false),
+        IpcCommand::ListAudio => unreachable!("handled above"),
+        IpcCommand::StartRegion => {
+            // Prefer plan path when audio_plan set or mic/app modes.
+            if req.audio_plan.is_some() {
+                match recorder.begin_region_plan(plan, notify_start) {
+                    Ok(()) => (recorder.complete_region_selection(), false),
+                    Err(r) => (r, false),
+                }
+            } else {
+                (recorder.start_region(req.audio, notify_start), false)
+            }
+        }
+        IpcCommand::StartFullscreen => {
+            if req.audio_plan.is_some() {
+                (
+                    recorder.start_fullscreen_plan(
+                        plan,
+                        notify_start,
+                        req.output.as_deref(),
+                        req.fps,
+                    ),
+                    false,
+                )
+            } else {
+                (
+                    recorder.start_fullscreen(
+                        req.audio,
+                        notify_start,
+                        req.output.as_deref(),
+                        req.fps,
+                    ),
+                    false,
+                )
+            }
+        }
+        IpcCommand::StartBoth => {
+            if req.audio_plan.is_some() {
+                (recorder.start_both_plan(plan, notify_start), false)
+            } else {
+                (recorder.start_both(req.audio, notify_start), false)
+            }
+        }
         IpcCommand::Stop => (recorder.stop(), false),
         IpcCommand::ToggleRegion => (recorder.toggle_region(req.audio, notify_start), false),
         IpcCommand::Shutdown => shutdown_result(recorder),
@@ -732,11 +781,24 @@ where
     Cl: Clipboard,
 {
     let notify_start = state.gui_clients == 0;
+    let plan = req.resolved_audio_plan(state.recorder.config());
 
     match req.cmd {
+        IpcCommand::ListAudio => {
+            let o = handle_request(&mut state.recorder, req, state.gui_clients);
+            write_response(writer, &o.response)?;
+            Ok(ConnAction::Done {
+                want_shutdown: false,
+            })
+        }
         IpcCommand::StartRegion => {
             // Non-blocking: begin slurp, park client until poll completes.
-            match state.recorder.begin_region(req.audio, notify_start) {
+            let begin = if req.audio_plan.is_some() {
+                state.recorder.begin_region_plan(plan, notify_start)
+            } else {
+                state.recorder.begin_region(req.audio, notify_start)
+            };
+            match begin {
                 Err(r) => {
                     let o = outcome_from_result(r, &state.recorder);
                     write_response(writer, &o.response)?;
@@ -748,16 +810,23 @@ where
             }
         }
         IpcCommand::ToggleRegion => match state.recorder.state() {
-            State::Idle => match state.recorder.begin_region(req.audio, notify_start) {
-                Err(r) => {
-                    let o = outcome_from_result(r, &state.recorder);
-                    write_response(writer, &o.response)?;
-                    Ok(ConnAction::Done {
-                        want_shutdown: false,
-                    })
+            State::Idle => {
+                let begin = if req.audio_plan.is_some() {
+                    state.recorder.begin_region_plan(plan, notify_start)
+                } else {
+                    state.recorder.begin_region(req.audio, notify_start)
+                };
+                match begin {
+                    Err(r) => {
+                        let o = outcome_from_result(r, &state.recorder);
+                        write_response(writer, &o.response)?;
+                        Ok(ConnAction::Done {
+                            want_shutdown: false,
+                        })
+                    }
+                    Ok(()) => Ok(ConnAction::Deferred),
                 }
-                Ok(()) => Ok(ConnAction::Deferred),
-            },
+            }
             _ => {
                 // Selecting→cancel, Recording→stop, etc. May complete pending.
                 let result = state.recorder.toggle_region(req.audio, notify_start);
@@ -779,12 +848,21 @@ where
             })
         }
         IpcCommand::StartFullscreen => {
-            let result = state.recorder.start_fullscreen(
-                req.audio,
-                notify_start,
-                req.output.as_deref(),
-                req.fps,
-            );
+            let result = if req.audio_plan.is_some() {
+                state.recorder.start_fullscreen_plan(
+                    plan,
+                    notify_start,
+                    req.output.as_deref(),
+                    req.fps,
+                )
+            } else {
+                state.recorder.start_fullscreen(
+                    req.audio,
+                    notify_start,
+                    req.output.as_deref(),
+                    req.fps,
+                )
+            };
             let o = outcome_from_result(result, &state.recorder);
             write_response(writer, &o.response)?;
             Ok(ConnAction::Done {
@@ -793,7 +871,11 @@ where
         }
         IpcCommand::StartBoth => {
             // Blocking stop later covers stitch; start itself is dual-spawn only.
-            let result = state.recorder.start_both(req.audio, notify_start);
+            let result = if req.audio_plan.is_some() {
+                state.recorder.start_both_plan(plan, notify_start)
+            } else {
+                state.recorder.start_both(req.audio, notify_start)
+            };
             let o = outcome_from_result(result, &state.recorder);
             write_response(writer, &o.response)?;
             Ok(ConnAction::Done {
@@ -1255,6 +1337,11 @@ mod tests {
         Config {
             output_dir: videos.to_path_buf(),
             audio_default: false,
+            system_audio: None,
+            audio_sink: None,
+            audio_app: None,
+            mic_default: false,
+            mic_device: None,
             copy_path: false,
             notify: false,
             notify_on_start_cli: false,
@@ -1269,13 +1356,17 @@ mod tests {
     type TestRec = Recorder<FakeSpawner, FakeClock, FakeNotifier, FakeClipboard>;
 
     fn make_recorder(videos: &Path, spawner: FakeSpawner) -> TestRec {
-        Recorder::new(
+        let mut rec = Recorder::new(
             spawner,
             FakeClock::at_secs(1_705_322_245),
             FakeNotifier,
             FakeClipboard,
             test_config(videos),
-        )
+        );
+        rec.force_audio_stub = true;
+        rec.forced_audio_device = Some("test.monitor".into());
+        rec.set_forced_output_inventory(Some(vec!["TEST-OUT".into()]));
+        rec
     }
 
     fn start_test_server(

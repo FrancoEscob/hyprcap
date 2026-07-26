@@ -325,7 +325,7 @@ Ideal automated coverage does not need a Wayland compositor.
 | Flathub / full packaging | Local `cargo install` / PATH notes |
 | i18n | English (or author language) strings OK |
 | Pause recording | Stop only |
-| Mic vs system matrix | Single `-a` boolean |
+| Mic vs system matrix | **In scope** — system (all/app) + mic pickers; single mixed track via Pulse null-sink |
 | Auto-upload | — |
 | Windows/macOS | — |
 

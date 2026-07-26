@@ -22,15 +22,40 @@ pub enum Command {
     Gui,
     /// Start region recording.
     Region {
-        /// Enable system audio (`wf-recorder -a`).
+        /// Enable system audio (default sink monitor). Legacy alias for `--system all`.
         #[arg(long)]
         audio: bool,
+        /// System sound: off | all | app (default: config / off).
+        #[arg(long, value_name = "MODE")]
+        system: Option<String>,
+        /// Sink name when `--system all` (default: Pulse default sink).
+        #[arg(long, value_name = "SINK")]
+        audio_sink: Option<String>,
+        /// Application name when `--system app` (e.g. Spotify).
+        #[arg(long, value_name = "NAME")]
+        audio_app: Option<String>,
+        /// Record microphone (mixed into one track with system sound).
+        #[arg(long)]
+        mic: bool,
+        /// Mic source name (`pactl list short sources`).
+        #[arg(long, value_name = "SOURCE")]
+        mic_device: Option<String>,
     },
     /// Start one-monitor fullscreen recording (no region; always `wf-recorder -o`).
     Fullscreen {
-        /// Enable system audio (`wf-recorder -a`).
+        /// Enable system audio (default sink monitor).
         #[arg(long)]
         audio: bool,
+        #[arg(long, value_name = "MODE")]
+        system: Option<String>,
+        #[arg(long, value_name = "SINK")]
+        audio_sink: Option<String>,
+        #[arg(long, value_name = "NAME")]
+        audio_app: Option<String>,
+        #[arg(long)]
+        mic: bool,
+        #[arg(long, value_name = "SOURCE")]
+        mic_device: Option<String>,
         /// Wayland output name (`wf-recorder -o`). Required when multi-monitor
         /// and `fullscreen_output` is unset in config.
         #[arg(long)]
@@ -43,18 +68,40 @@ pub enum Command {
     },
     /// Start both-monitors recording (exactly 2 heads; layout-true compose after stop).
     Both {
-        /// Enable system audio on the primary head only (`wf-recorder -a`).
+        /// Enable system audio on the primary head only.
         #[arg(long)]
         audio: bool,
+        #[arg(long, value_name = "MODE")]
+        system: Option<String>,
+        #[arg(long, value_name = "SINK")]
+        audio_sink: Option<String>,
+        #[arg(long, value_name = "NAME")]
+        audio_app: Option<String>,
+        #[arg(long)]
+        mic: bool,
+        #[arg(long, value_name = "SOURCE")]
+        mic_device: Option<String>,
     },
     /// Toggle region: Idle→start, SelectingRegion→cancel, Recording→stop.
     ToggleRegion {
-        /// Enable system audio (`wf-recorder -a`) when starting.
+        /// Enable system audio when starting.
         #[arg(long)]
         audio: bool,
+        #[arg(long, value_name = "MODE")]
+        system: Option<String>,
+        #[arg(long, value_name = "SINK")]
+        audio_sink: Option<String>,
+        #[arg(long, value_name = "NAME")]
+        audio_app: Option<String>,
+        #[arg(long)]
+        mic: bool,
+        #[arg(long, value_name = "SOURCE")]
+        mic_device: Option<String>,
     },
     /// List known Wayland outputs (name + geometry/refresh when known; no daemon).
     ListOutputs,
+    /// List audio sinks, mics, and playing apps (JSON).
+    ListAudio,
     /// Stop recording / cancel selection (no-op success if idle).
     Stop,
     /// Print one JSON status object on stdout.
@@ -105,27 +152,114 @@ fn ensure_and_request(req: &IpcRequest) -> Result<IpcResponse, String> {
     server::ensure_and_request(&paths, req)
 }
 
+fn cli_audio_plan(
+    audio: bool,
+    system: Option<String>,
+    audio_sink: Option<String>,
+    audio_app: Option<String>,
+    mic: bool,
+    mic_device: Option<String>,
+) -> Option<hyprcap::audio::AudioPlan> {
+    use hyprcap::audio::{AudioPlan, SystemAudioMode};
+    let has_matrix = system.is_some()
+        || audio_sink.is_some()
+        || audio_app.is_some()
+        || mic
+        || mic_device.is_some();
+    if !has_matrix && !audio {
+        return None; // pure config defaults on server
+    }
+    let system_mode = if let Some(s) = system.as_deref() {
+        SystemAudioMode::parse(s).unwrap_or(SystemAudioMode::Off)
+    } else if audio {
+        SystemAudioMode::All
+    } else {
+        SystemAudioMode::Off
+    };
+    Some(
+        AudioPlan {
+            system: system_mode,
+            sink: audio_sink,
+            app: audio_app,
+            mic: mic || mic_device.is_some(),
+            mic_device,
+        }
+        .normalized(),
+    )
+}
+
+fn start_req_region(
+    audio: bool,
+    system: Option<String>,
+    audio_sink: Option<String>,
+    audio_app: Option<String>,
+    mic: bool,
+    mic_device: Option<String>,
+) -> IpcRequest {
+    if let Some(plan) = cli_audio_plan(audio, system, audio_sink, audio_app, mic, mic_device) {
+        IpcRequest::start_region_plan(plan)
+    } else {
+        IpcRequest::start_region(None)
+    }
+}
+
 fn dispatch(cmd: Command) -> Result<i32, String> {
     match cmd {
         Command::Gui => {
             // GTK/Adwaita init happens only inside `ui::run_gui` — never here for other cmds.
             Ok(crate::ui::run_gui())
         }
-        Command::Region { audio } => {
-            let audio = if audio { Some(true) } else { None };
-            let resp = ensure_and_request(&IpcRequest::start_region(audio))?;
+        Command::Region {
+            audio,
+            system,
+            audio_sink,
+            audio_app,
+            mic,
+            mic_device,
+        } => {
+            let resp = ensure_and_request(&start_req_region(
+                audio, system, audio_sink, audio_app, mic, mic_device,
+            ))?;
             print_message(&resp);
             Ok(exit_from(&resp))
         }
-        Command::Fullscreen { audio, output, fps } => {
-            let audio = if audio { Some(true) } else { None };
-            let resp = ensure_and_request(&IpcRequest::start_fullscreen(audio, output, fps))?;
+        Command::Fullscreen {
+            audio,
+            system,
+            audio_sink,
+            audio_app,
+            mic,
+            mic_device,
+            output,
+            fps,
+        } => {
+            let req = if let Some(plan) =
+                cli_audio_plan(audio, system, audio_sink, audio_app, mic, mic_device)
+            {
+                IpcRequest::start_fullscreen_plan(plan, output, fps)
+            } else {
+                IpcRequest::start_fullscreen(None, output, fps)
+            };
+            let resp = ensure_and_request(&req)?;
             print_message(&resp);
             Ok(exit_from(&resp))
         }
-        Command::Both { audio } => {
-            let audio = if audio { Some(true) } else { None };
-            let resp = ensure_and_request(&IpcRequest::start_both(audio))?;
+        Command::Both {
+            audio,
+            system,
+            audio_sink,
+            audio_app,
+            mic,
+            mic_device,
+        } => {
+            let req = if let Some(plan) =
+                cli_audio_plan(audio, system, audio_sink, audio_app, mic, mic_device)
+            {
+                IpcRequest::start_both_plan(plan)
+            } else {
+                IpcRequest::start_both(None)
+            };
+            let resp = ensure_and_request(&req)?;
             print_message(&resp);
             Ok(exit_from(&resp))
         }
@@ -143,9 +277,49 @@ fn dispatch(cmd: Command) -> Result<i32, String> {
                 Ok(0)
             }
         }
-        Command::ToggleRegion { audio } => {
-            let audio = if audio { Some(true) } else { None };
-            let resp = ensure_and_request(&IpcRequest::toggle_region(audio))?;
+        Command::ListAudio => {
+            let inv = hyprcap::audio::list_audio_inventory().map_err(|e| e.to_string())?;
+            let json = serde_json::to_string_pretty(&inv).map_err(|e| e.to_string())?;
+            let mut out = std::io::stdout();
+            writeln!(out, "{json}").map_err(|e| e.to_string())?;
+            Ok(0)
+        }
+        Command::ToggleRegion {
+            audio,
+            system,
+            audio_sink,
+            audio_app,
+            mic,
+            mic_device,
+        } => {
+            // Toggle uses legacy audio bool; matrix flags map to --audio when system all.
+            let plan = cli_audio_plan(audio, system, audio_sink, audio_app, mic, mic_device);
+            let audio_flag = plan
+                .as_ref()
+                .map(|p| p.enabled())
+                .unwrap_or(false);
+            // Prefer full plan via start when idle would need matrix — server toggle only
+            // takes legacy bool; if plan is rich, use start_region_plan when idle via
+            // a start request is better. Keep toggle simple: --audio / plan enabled.
+            let resp = if let Some(p) = plan.filter(|p| {
+                p.mic
+                    || p.system == hyprcap::audio::SystemAudioMode::App
+                    || p.sink.is_some()
+                    || p.mic_device.is_some()
+            }) {
+                // Complex plan: emulate toggle with status then start/stop.
+                let st = ensure_and_request(&IpcRequest::status())?;
+                match st.status.state.as_str() {
+                    "Idle" => ensure_and_request(&IpcRequest::start_region_plan(p))?,
+                    _ => ensure_and_request(&IpcRequest::stop())?,
+                }
+            } else {
+                ensure_and_request(&IpcRequest::toggle_region(if audio_flag {
+                    Some(true)
+                } else {
+                    None
+                }))?
+            };
             print_message(&resp);
             Ok(exit_from(&resp))
         }

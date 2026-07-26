@@ -14,8 +14,24 @@ use crate::ports::{absolutize_path, default_videos_dir, Paths, PortError};
 pub struct Config {
     /// Where recording files are written (absolute after load/normalize).
     pub output_dir: PathBuf,
-    /// System audio off unless toggled / CLI override.
+    /// Legacy: system-all audio off unless toggled / CLI override.
+    /// When `system_audio` is set, that field wins for system mode.
     pub audio_default: bool,
+    /// System capture: `"off" | "all" | "app"`. None → derive from `audio_default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio: Option<String>,
+    /// Sink name for system `all` (empty/None = default sink).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_sink: Option<String>,
+    /// Preferred application name for system `app` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_app: Option<String>,
+    /// Record microphone by default.
+    #[serde(default)]
+    pub mic_default: bool,
+    /// Mic source name (empty/None = default input source).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_device: Option<String>,
     /// Copy absolute path via clipboard on success.
     pub copy_path: bool,
     /// Desktop notifications.
@@ -53,6 +69,11 @@ impl Default for Config {
         Self {
             output_dir,
             audio_default: false,
+            system_audio: None,
+            audio_sink: None,
+            audio_app: None,
+            mic_default: false,
+            mic_device: None,
             copy_path: true,
             notify: true,
             notify_on_start_cli: true,
@@ -90,6 +111,11 @@ impl Config {
         Self {
             output_dir: PathBuf::new(),
             audio_default: false,
+            system_audio: None,
+            audio_sink: None,
+            audio_app: None,
+            mic_default: false,
+            mic_device: None,
             copy_path: true,
             notify: true,
             notify_on_start_cli: true,
@@ -98,6 +124,38 @@ impl Config {
             fullscreen_output: None,
             one_fps: None,
         }
+    }
+
+    /// Effective audio plan from sticky config fields.
+    pub fn audio_plan(&self) -> crate::audio::AudioPlan {
+        use crate::audio::{AudioPlan, SystemAudioMode};
+        let system = if let Some(ref s) = self.system_audio {
+            SystemAudioMode::parse(s).unwrap_or(SystemAudioMode::Off)
+        } else if self.audio_default {
+            SystemAudioMode::All
+        } else {
+            SystemAudioMode::Off
+        };
+        AudioPlan {
+            system,
+            sink: self.audio_sink.clone(),
+            app: self.audio_app.clone(),
+            mic: self.mic_default,
+            mic_device: self.mic_device.clone(),
+        }
+        .normalized()
+    }
+
+    /// Persist a plan back into config fields (GUI sticky).
+    pub fn apply_audio_plan(&mut self, plan: &crate::audio::AudioPlan) {
+        let p = plan.clone().normalized();
+        self.system_audio = Some(p.system.as_str().to_string());
+        self.audio_default = p.system == crate::audio::SystemAudioMode::All
+            || p.system == crate::audio::SystemAudioMode::App;
+        self.audio_sink = p.sink;
+        self.audio_app = p.app;
+        self.mic_default = p.mic;
+        self.mic_device = p.mic_device;
     }
 
     /// Effective fullscreen `-o` override, if configured non-empty.
@@ -209,6 +267,11 @@ impl Config {
 struct PartialConfig {
     output_dir: Option<PathBuf>,
     audio_default: Option<bool>,
+    system_audio: Option<String>,
+    audio_sink: Option<String>,
+    audio_app: Option<String>,
+    mic_default: Option<bool>,
+    mic_device: Option<String>,
     copy_path: Option<bool>,
     notify: Option<bool>,
     notify_on_start_cli: Option<bool>,
@@ -225,6 +288,21 @@ impl PartialConfig {
         }
         if let Some(v) = self.audio_default {
             base.audio_default = v;
+        }
+        if let Some(v) = self.system_audio {
+            base.system_audio = Some(v);
+        }
+        if let Some(v) = self.audio_sink {
+            base.audio_sink = Some(v);
+        }
+        if let Some(v) = self.audio_app {
+            base.audio_app = Some(v);
+        }
+        if let Some(v) = self.mic_default {
+            base.mic_default = v;
+        }
+        if let Some(v) = self.mic_device {
+            base.mic_device = Some(v);
         }
         if let Some(v) = self.copy_path {
             base.copy_path = v;

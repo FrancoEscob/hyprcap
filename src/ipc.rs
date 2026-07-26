@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::audio::{AudioInventory, AudioPlan};
 use crate::recorder::{CommandResult, MachineCode, Status};
 
 /// IPC request command names.
@@ -23,15 +24,20 @@ pub enum IpcCommand {
     ToggleRegion,
     Shutdown,
     Subscribe,
+    /// Enumerate sinks / mics / playing apps (Pulse/PipeWire via pactl).
+    ListAudio,
 }
 
 /// Client → server request (one JSON object per line).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IpcRequest {
     pub cmd: IpcCommand,
-    /// Optional audio override for start / toggle-region.
+    /// Optional audio override for start / toggle-region (legacy boolean).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<bool>,
+    /// Full audio matrix (system / app / mic). Wins over `audio` when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_plan: Option<AudioPlan>,
     /// When true (typically with `Subscribe`), the server counts this connection
     /// as a GUI view until disconnect (idle-exit / notify-on-start policy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,30 +53,45 @@ pub struct IpcRequest {
 }
 
 impl IpcRequest {
-    pub fn ping() -> Self {
+    fn bare(cmd: IpcCommand) -> Self {
         Self {
-            cmd: IpcCommand::Ping,
+            cmd,
             audio: None,
+            audio_plan: None,
             gui: None,
             output: None,
             fps: None,
         }
     }
 
+    pub fn ping() -> Self {
+        Self::bare(IpcCommand::Ping)
+    }
+
     pub fn status() -> Self {
-        Self {
-            cmd: IpcCommand::Status,
-            audio: None,
-            gui: None,
-            output: None,
-            fps: None,
-        }
+        Self::bare(IpcCommand::Status)
+    }
+
+    pub fn list_audio() -> Self {
+        Self::bare(IpcCommand::ListAudio)
     }
 
     pub fn start_region(audio: Option<bool>) -> Self {
         Self {
             cmd: IpcCommand::StartRegion,
             audio,
+            audio_plan: None,
+            gui: None,
+            output: None,
+            fps: None,
+        }
+    }
+
+    pub fn start_region_plan(plan: AudioPlan) -> Self {
+        Self {
+            cmd: IpcCommand::StartRegion,
+            audio: None,
+            audio_plan: Some(plan),
             gui: None,
             output: None,
             fps: None,
@@ -81,6 +102,22 @@ impl IpcRequest {
         Self {
             cmd: IpcCommand::StartFullscreen,
             audio,
+            audio_plan: None,
+            gui: None,
+            output,
+            fps,
+        }
+    }
+
+    pub fn start_fullscreen_plan(
+        plan: AudioPlan,
+        output: Option<String>,
+        fps: Option<u32>,
+    ) -> Self {
+        Self {
+            cmd: IpcCommand::StartFullscreen,
+            audio: None,
+            audio_plan: Some(plan),
             gui: None,
             output,
             fps,
@@ -92,6 +129,18 @@ impl IpcRequest {
         Self {
             cmd: IpcCommand::StartBoth,
             audio,
+            audio_plan: None,
+            gui: None,
+            output: None,
+            fps: None,
+        }
+    }
+
+    pub fn start_both_plan(plan: AudioPlan) -> Self {
+        Self {
+            cmd: IpcCommand::StartBoth,
+            audio: None,
+            audio_plan: Some(plan),
             gui: None,
             output: None,
             fps: None,
@@ -99,19 +148,14 @@ impl IpcRequest {
     }
 
     pub fn stop() -> Self {
-        Self {
-            cmd: IpcCommand::Stop,
-            audio: None,
-            gui: None,
-            output: None,
-            fps: None,
-        }
+        Self::bare(IpcCommand::Stop)
     }
 
     pub fn toggle_region(audio: Option<bool>) -> Self {
         Self {
             cmd: IpcCommand::ToggleRegion,
             audio,
+            audio_plan: None,
             gui: None,
             output: None,
             fps: None,
@@ -119,13 +163,7 @@ impl IpcRequest {
     }
 
     pub fn shutdown() -> Self {
-        Self {
-            cmd: IpcCommand::Shutdown,
-            audio: None,
-            gui: None,
-            output: None,
-            fps: None,
-        }
+        Self::bare(IpcCommand::Shutdown)
     }
 
     /// GUI attach: server counts this connection until disconnect.
@@ -133,10 +171,16 @@ impl IpcRequest {
         Self {
             cmd: IpcCommand::Subscribe,
             audio: None,
+            audio_plan: None,
             gui: Some(true),
             output: None,
             fps: None,
         }
+    }
+
+    /// Resolve effective audio plan for a start command.
+    pub fn resolved_audio_plan(&self, config: &crate::config::Config) -> AudioPlan {
+        AudioPlan::resolve(self.audio_plan.clone(), self.audio, config)
     }
 }
 
@@ -179,6 +223,13 @@ impl From<&Status> for IpcStatus {
     }
 }
 
+/// Response payload for `list_audio`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IpcAudioList {
+    #[serde(flatten)]
+    pub inventory: AudioInventory,
+}
+
 /// Server → client response (one JSON object per line).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IpcResponse {
@@ -188,6 +239,9 @@ pub struct IpcResponse {
     pub status: IpcStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Present for `list_audio` responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_list: Option<AudioInventory>,
 }
 
 impl IpcResponse {
@@ -198,6 +252,7 @@ impl IpcResponse {
             message: result.message.clone(),
             status: IpcStatus::from(status),
             warnings: result.warnings.clone(),
+            audio_list: None,
         }
     }
 
@@ -208,6 +263,7 @@ impl IpcResponse {
             message: message.into(),
             status: IpcStatus::from(status),
             warnings: Vec::new(),
+            audio_list: None,
         }
     }
 
@@ -218,6 +274,18 @@ impl IpcResponse {
             message: message.into(),
             status: IpcStatus::from(status),
             warnings: Vec::new(),
+            audio_list: None,
+        }
+    }
+
+    pub fn audio_list(inv: AudioInventory, status: &Status) -> Self {
+        Self {
+            ok: true,
+            code: MachineCode::Ok.as_str().to_string(),
+            message: "audio inventory".into(),
+            status: IpcStatus::from(status),
+            warnings: Vec::new(),
+            audio_list: Some(inv),
         }
     }
 
@@ -349,6 +417,7 @@ mod tests {
             message: "cancel".into(),
             status: IpcStatus::from(&st),
             warnings: vec![],
+            audio_list: None,
         };
         assert_eq!(cancel.cli_exit_code(), 0);
     }

@@ -29,6 +29,8 @@ optdepends=(
   'libnotify: desktop notifications (notify-send)'
   'wl-clipboard: copy absolute path on success (wl-copy)'
   'xdg-utils: open last file/folder from the GUI'
+  'pipewire-pulse: system/app/mic audio matrix (pactl; recommended)'
+  'pulse-native-provider: alternative Pulse API for audio capture'
 )
 provides=('hyprcap')
 conflicts=('hyprcap' 'record-ui' 'record-ui-git')
@@ -77,4 +79,5 @@ package() {
     "$pkgdir/usr/share/icons/hicolor/256x256/apps/hyprcap.png"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/hyprcap/README.md"
+  install -Dm644 CHANGELOG.md "$pkgdir/usr/share/doc/hyprcap/CHANGELOG.md"
 }

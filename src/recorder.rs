@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::audio::{self, AudioPlan, AudioSession};
 use crate::config::Config;
 use crate::ports::{
     absolutize_path, ChildHandle, Clipboard, Clock, CommandSpawner, ExitStatus, Notifier,
@@ -211,10 +212,16 @@ where
     clipboard: Cl,
     config: Config,
 
-    /// Effective audio for the current / last session.
-    audio: bool,
-    /// Pending audio override while selecting a region.
-    pending_audio: bool,
+    /// Effective audio plan for the current / last session.
+    audio_plan: AudioPlan,
+    /// Pending audio plan while selecting a region.
+    pending_audio_plan: AudioPlan,
+    /// Live Pulse mix/session to tear down on stop (if any).
+    audio_session: Option<AudioSession>,
+    /// When true, skip live `pactl` and use [`Self::forced_audio_device`] (unit tests).
+    pub force_audio_stub: bool,
+    /// Capture source when `force_audio_stub` and plan is enabled.
+    pub forced_audio_device: Option<String>,
     /// Whether to fire start notify for the in-flight start (CLI vs GUI).
     notify_start: bool,
 
@@ -262,7 +269,7 @@ where
 {
     pub fn new(spawner: S, clock: C, notifier: N, clipboard: Cl, mut config: Config) -> Self {
         config.normalize_paths(None);
-        let audio = config.audio_default;
+        let audio_plan = config.audio_plan();
         Self {
             state: State::Idle,
             spawner,
@@ -270,8 +277,11 @@ where
             notifier,
             clipboard,
             config,
-            audio,
-            pending_audio: audio,
+            audio_plan: audio_plan.clone(),
+            pending_audio_plan: audio_plan,
+            audio_session: None,
+            force_audio_stub: false,
+            forced_audio_device: Some("test.monitor".into()),
             notify_start: true,
             slurp_child: None,
             recorder_child: None,
@@ -392,7 +402,7 @@ where
             output_path: self.output_path.clone(),
             pid,
             started_at_unix,
-            audio: self.audio,
+            audio: self.audio_plan.enabled(),
             last_error: self.last_error.clone(),
             last_success_path: self.last_success_path.clone(),
             elapsed_ms: if matches!(self.state, State::Recording | State::Stopping) {
@@ -451,7 +461,7 @@ where
             return Err(CommandResult::err(MachineCode::DepMissing, msg));
         }
 
-        self.pending_audio = audio.unwrap_or(self.config.audio_default);
+        self.pending_audio_plan = AudioPlan::resolve(None, audio, &self.config);
         self.notify_start = notify_start;
         self.last_error = None;
 
@@ -576,20 +586,65 @@ where
             }
         };
         let fps = resolve_one_fps(fps_override, self.config.one_fps_override());
-        let audio = audio.unwrap_or(self.config.audio_default);
+        let plan = AudioPlan::resolve(None, audio, &self.config);
         self.notify_start = notify_start;
         self.last_error = None;
         self.capture_mode = Some(CaptureMode::One);
         self.capture_output = Some(name.clone());
         self.clear_both_session_fields();
-        self.spawn_recorder(None, audio, Some(name), fps)
+        self.spawn_recorder(None, plan, Some(name), fps)
+    }
+
+    /// Fullscreen with an explicit audio plan (GUI matrix).
+    pub fn start_fullscreen_plan(
+        &mut self,
+        plan: AudioPlan,
+        notify_start: bool,
+        output_override: Option<&str>,
+        fps_override: Option<u32>,
+    ) -> CommandResult {
+        if self.state != State::Idle {
+            return CommandResult::err(
+                MachineCode::Busy,
+                format!("busy: state is {}", self.state.as_str()),
+            );
+        }
+        if !self.spawner.command_exists("wf-recorder") {
+            let msg = "missing hard dependency: wf-recorder".to_string();
+            self.last_error = Some(msg.clone());
+            return CommandResult::err(MachineCode::DepMissing, msg);
+        }
+        let inventory = self.output_inventory();
+        let name = match resolve_fullscreen_output(
+            output_override,
+            self.config.fullscreen_output_override(),
+            &inventory,
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                self.last_error = Some(e.clone());
+                return CommandResult::err(MachineCode::Invalid, e);
+            }
+        };
+        let fps = resolve_one_fps(fps_override, self.config.one_fps_override());
+        self.notify_start = notify_start;
+        self.last_error = None;
+        self.capture_mode = Some(CaptureMode::One);
+        self.capture_output = Some(name.clone());
+        self.clear_both_session_fields();
+        self.spawn_recorder(None, plan.normalized(), Some(name), fps)
     }
 
     /// Both-monitors start: dual `wf-recorder` @ 60 fps + `-D`, layout-true stitch on stop.
     ///
     /// Preconditions (DUAL-MONITOR §7.1–7.2): inventory length exactly 2 with hyprctl
-    /// positions, `ffmpeg` + `wf-recorder` present. Audio (`-a`) only on primary.
+    /// positions, `ffmpeg` + `wf-recorder` present. Audio only on primary.
     pub fn start_both(&mut self, audio: Option<bool>, notify_start: bool) -> CommandResult {
+        let plan = AudioPlan::resolve(None, audio, &self.config);
+        self.start_both_plan(plan, notify_start)
+    }
+
+    pub fn start_both_plan(&mut self, plan: AudioPlan, notify_start: bool) -> CommandResult {
         if self.state != State::Idle {
             return CommandResult::err(
                 MachineCode::Busy,
@@ -616,14 +671,56 @@ where
             }
         };
 
-        let audio = audio.unwrap_or(self.config.audio_default);
         self.notify_start = notify_start;
         self.last_error = None;
-        self.audio = audio;
+        self.audio_plan = plan.clone().normalized();
         self.capture_mode = Some(CaptureMode::Both);
         self.capture_output = Some(format!("{}+{}", layout.primary.name, layout.secondary.name));
         self.both_layout = Some(layout.clone());
-        self.spawn_both_recorders(layout, audio)
+        self.spawn_both_recorders(layout, self.audio_plan.clone())
+    }
+
+    /// Region start with explicit plan (after slurp path uses pending).
+    pub fn begin_region_plan(
+        &mut self,
+        plan: AudioPlan,
+        notify_start: bool,
+    ) -> Result<(), CommandResult> {
+        if self.state != State::Idle {
+            return Err(CommandResult::err(
+                MachineCode::Busy,
+                format!("busy: state is {}", self.state.as_str()),
+            ));
+        }
+        if !self.spawner.command_exists("slurp") {
+            let msg = "missing hard dependency: slurp".to_string();
+            self.last_error = Some(msg.clone());
+            return Err(CommandResult::err(MachineCode::DepMissing, msg));
+        }
+        if !self.spawner.command_exists("wf-recorder") {
+            let msg = "missing hard dependency: wf-recorder".to_string();
+            self.last_error = Some(msg.clone());
+            return Err(CommandResult::err(MachineCode::DepMissing, msg));
+        }
+
+        self.pending_audio_plan = plan.normalized();
+        self.notify_start = notify_start;
+        self.last_error = None;
+
+        let argv = vec!["slurp".to_string()];
+        match self.spawner.spawn(&argv, SpawnOpts::default()) {
+            Ok(child) => {
+                self.slurp_child = Some(child);
+                self.state = State::SelectingRegion;
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("failed to spawn slurp: {e}");
+                self.last_error = Some(msg.clone());
+                self.state = State::Idle;
+                Err(CommandResult::err(MachineCode::SpawnFailed, msg))
+            }
+        }
     }
 
     /// Stop if selecting or recording; idle no-op success; Stopping is idempotent.
@@ -684,18 +781,68 @@ where
         self.capture_mode = Some(CaptureMode::Region);
         self.capture_output = None;
         self.clear_both_session_fields();
-        self.spawn_recorder(Some(geom), self.pending_audio, None, None)
+        self.spawn_recorder(Some(geom), self.pending_audio_plan.clone(), None, None)
+    }
+
+    /// Prepare Pulse capture source for the plan (or stub in tests).
+    fn arm_audio_session(&mut self, plan: &AudioPlan) -> Result<Option<String>, CommandResult> {
+        self.teardown_audio_session();
+        self.audio_plan = plan.clone().normalized();
+        if !self.audio_plan.enabled() {
+            self.audio_session = None;
+            return Ok(None);
+        }
+        if self.force_audio_stub {
+            let dev = self
+                .forced_audio_device
+                .clone()
+                .unwrap_or_else(|| "test.monitor".into());
+            self.audio_session = Some(AudioSession {
+                capture_source: dev.clone(),
+                module_ids: Vec::new(),
+                moved_apps: Vec::new(),
+            });
+            return Ok(Some(dev));
+        }
+        match audio::setup_session(&self.audio_plan) {
+            Ok(sess) => {
+                let dev = sess.as_ref().map(|s| s.capture_source.clone());
+                self.audio_session = sess;
+                Ok(dev)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                self.last_error = Some(msg.clone());
+                Err(CommandResult::err(MachineCode::SpawnFailed, msg))
+            }
+        }
+    }
+
+    fn teardown_audio_session(&mut self) {
+        if let Some(sess) = self.audio_session.take() {
+            if self.force_audio_stub {
+                return;
+            }
+            let _ = audio::teardown_session(&sess);
+        }
     }
 
     fn spawn_recorder(
         &mut self,
         geometry: Option<String>,
-        audio: bool,
+        plan: AudioPlan,
         fullscreen_output: Option<String>,
         fps: Option<u32>,
     ) -> CommandResult {
         self.state = State::Starting;
-        self.audio = audio;
+
+        let audio_device = match self.arm_audio_session(&plan) {
+            Ok(d) => d,
+            Err(r) => {
+                self.reset_to_idle_clear_session();
+                return r;
+            }
+        };
 
         if let Err(e) = ensure_output_dir(&self.config.output_dir) {
             self.reset_to_idle_clear_session();
@@ -733,7 +880,7 @@ where
 
         let argv = build_wf_recorder_argv(
             geometry.as_deref(),
-            audio,
+            audio_device.as_deref(),
             &path,
             fullscreen_output.as_deref(),
             fps,
@@ -771,9 +918,17 @@ where
         }
     }
 
-    /// Dual capture: primary first (optional `-a`), then secondary; both before Recording.
-    fn spawn_both_recorders(&mut self, layout: BothLayout, audio: bool) -> CommandResult {
+    /// Dual capture: primary first (optional audio device), then secondary; both before Recording.
+    fn spawn_both_recorders(&mut self, layout: BothLayout, plan: AudioPlan) -> CommandResult {
         self.state = State::Starting;
+
+        let audio_device = match self.arm_audio_session(&plan) {
+            Ok(d) => d,
+            Err(r) => {
+                self.reset_to_idle_clear_session();
+                return r;
+            }
+        };
 
         if let Err(e) = ensure_output_dir(&self.config.output_dir) {
             self.reset_to_idle_clear_session();
@@ -806,8 +961,9 @@ where
             &std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         );
 
-        let argv_a = build_both_wf_recorder_argv(&layout.primary.name, audio, &temp_a);
-        let argv_b = build_both_wf_recorder_argv(&layout.secondary.name, false, &temp_b);
+        let argv_a =
+            build_both_wf_recorder_argv(&layout.primary.name, audio_device.as_deref(), &temp_a);
+        let argv_b = build_both_wf_recorder_argv(&layout.secondary.name, None, &temp_b);
         let opts = SpawnOpts {
             new_process_group: true,
         };
@@ -876,6 +1032,7 @@ where
     }
 
     fn reset_to_idle_clear_session(&mut self) {
+        self.teardown_audio_session();
         self.state = State::Idle;
         self.recorder_child = None;
         self.recorder_child_b = None;
@@ -1205,7 +1362,13 @@ where
             return Err("ffmpeg missing at stitch time".into());
         }
         // Blocking compose: stop/quit RPC waits here until ffmpeg exits (documented product A).
-        let argv = build_layout_true_ffmpeg_argv(temp_a, temp_b, layout, final_path, self.audio);
+        let argv = build_layout_true_ffmpeg_argv(
+            temp_a,
+            temp_b,
+            layout,
+            final_path,
+            self.audio_plan.enabled(),
+        );
         let opts = SpawnOpts {
             new_process_group: true,
         };
@@ -1800,10 +1963,10 @@ fn format_known_outputs(inventory: &[String]) -> String {
 /// is `Some` (defensive; production region path passes `None`).
 ///
 /// Fullscreen production paths must pass a non-empty `output` so `-o` is always present.
-/// Order (DUAL-MONITOR §6.3): `wf-recorder -o NAME [-r FPS] [-a] -f path`.
+/// Order (DUAL-MONITOR §6.3): `wf-recorder -o NAME [-r FPS] [-aDEVICE] -f path`.
 pub fn build_wf_recorder_argv(
     geometry: Option<&str>,
-    audio: bool,
+    audio_device: Option<&str>,
     path: &Path,
     output: Option<&str>,
     fps: Option<u32>,
@@ -1827,8 +1990,8 @@ pub fn build_wf_recorder_argv(
             argv.push(r.to_string());
         }
     }
-    if audio {
-        argv.push("-a".into());
+    if let Some(flag) = audio::audio_argv_flag(audio_device) {
+        argv.push(flag);
     }
     argv.push("-f".into());
     argv.push(path.display().to_string());
@@ -2008,8 +2171,12 @@ pub fn build_layout_true_ffmpeg_argv(
     argv
 }
 
-/// Both child argv: `wf-recorder -o NAME -r 60 -D [-a] -f temp` (never shell).
-pub fn build_both_wf_recorder_argv(output: &str, audio: bool, path: &Path) -> Vec<String> {
+/// Both child argv: `wf-recorder -o NAME -r 60 -D [-aDEVICE] -f temp` (never shell).
+pub fn build_both_wf_recorder_argv(
+    output: &str,
+    audio_device: Option<&str>,
+    path: &Path,
+) -> Vec<String> {
     let mut argv = vec![
         "wf-recorder".into(),
         "-o".into(),
@@ -2018,8 +2185,8 @@ pub fn build_both_wf_recorder_argv(output: &str, audio: bool, path: &Path) -> Ve
         BOTH_FPS.to_string(),
         "-D".into(),
     ];
-    if audio {
-        argv.push("-a".into());
+    if let Some(flag) = audio::audio_argv_flag(audio_device) {
+        argv.push(flag);
     }
     argv.push("-f".into());
     argv.push(path.display().to_string());
@@ -2580,6 +2747,11 @@ mod tests {
             Config {
                 output_dir: self.root.join("Videos"),
                 audio_default: false,
+                system_audio: None,
+                audio_sink: None,
+                audio_app: None,
+                mic_default: false,
+                mic_device: None,
                 copy_path: true,
                 notify: true,
                 notify_on_start_cli: true,
@@ -2630,6 +2802,9 @@ mod tests {
         );
         // Inventory must include config pin TEST-OUT; avoid real hyprctl.
         rec.set_forced_output_inventory(Some(vec!["TEST-OUT".into()]));
+        // Never touch real Pulse/PipeWire in unit tests.
+        rec.force_audio_stub = true;
+        rec.forced_audio_device = Some("test.monitor".into());
         rec
     }
 
@@ -2685,7 +2860,7 @@ mod tests {
         assert_eq!(argv[gpos + 1], "10,20 300x200");
         assert!(argv.contains(&"-f".into()));
         assert!(wf[0].opts.new_process_group);
-        assert!(!argv.iter().any(|a| a == "-a"));
+        assert!(!argv.iter().any(|a| a.starts_with("-a")));
         let fpos = argv.iter().position(|a| a == "-f").unwrap();
         assert!(
             Path::new(&argv[fpos + 1]).is_absolute(),
@@ -2721,7 +2896,7 @@ mod tests {
         assert!(rec.spawner().wf_spawns().is_empty());
     }
 
-    /// U3: audio on/off → -a present/absent
+    /// U3: audio on/off → -aDEVICE present/absent
     #[test]
     fn u3_audio_on_off() {
         let paths = TempPaths::new();
@@ -2731,14 +2906,17 @@ mod tests {
         let mut rec = make_recorder(&paths, spawner);
         rec.start_region(Some(true), true);
         let argv = &rec.spawner().wf_spawns()[0].argv;
-        assert!(argv.iter().any(|a| a == "-a"));
+        assert!(
+            argv.iter().any(|a| a.starts_with("-a")),
+            "expected -aDEVICE: {argv:?}"
+        );
 
         let mut spawner = FakeSpawner::new();
         spawner.push_script(slurp_ok("0,0 1x1"));
         let mut rec = make_recorder(&paths, spawner);
         rec.start_region(Some(false), true);
         let argv = &rec.spawner().wf_spawns()[0].argv;
-        assert!(!argv.iter().any(|a| a == "-a"));
+        assert!(!argv.iter().any(|a| a.starts_with("-a")));
     }
 
     /// U4: fullscreen start → no -g; always has -o with non-empty name
@@ -3146,13 +3324,18 @@ mod tests {
             FakeClipboard::default(),
             cfg,
         );
+        rec.force_audio_stub = true;
+        rec.forced_audio_device = Some("test.monitor".into());
 
         let r = rec.start_region(None, true);
         assert!(r.ok, "{r:?}");
         // notify=false → no start notify even if notify_start true
         assert!(rec.notifier().calls.is_empty());
         let argv = &rec.spawner().wf_spawns()[0].argv;
-        assert!(argv.iter().any(|a| a == "-a"));
+        assert!(
+            argv.iter().any(|a| a.starts_with("-a")),
+            "audio_default: {argv:?}"
+        );
         let fpos = argv.iter().position(|a| a == "-f").unwrap();
         assert!(argv[fpos + 1].contains("CustomClips"));
         assert!(Path::new(&argv[fpos + 1]).is_absolute());
@@ -3269,20 +3452,40 @@ mod tests {
     #[test]
     fn build_argv_helpers() {
         let p = Path::new("/tmp/rec.mp4");
-        let a = build_wf_recorder_argv(Some("0,0 10x10"), true, p, Some("HDMI-A-1"), None);
+        let a = build_wf_recorder_argv(
+            Some("0,0 10x10"),
+            Some("spk.monitor"),
+            p,
+            Some("HDMI-A-1"),
+            None,
+        );
         assert_eq!(
             a,
-            vec!["wf-recorder", "-g", "0,0 10x10", "-a", "-f", "/tmp/rec.mp4"]
+            vec![
+                "wf-recorder",
+                "-g",
+                "0,0 10x10",
+                "-aspk.monitor",
+                "-f",
+                "/tmp/rec.mp4"
+            ]
         );
-        let b = build_wf_recorder_argv(None, false, p, None, None);
+        let b = build_wf_recorder_argv(None, None, p, None, None);
         assert_eq!(b, vec!["wf-recorder", "-f", "/tmp/rec.mp4"]);
-        let c = build_wf_recorder_argv(None, true, p, Some("DP-1"), None);
+        let c = build_wf_recorder_argv(None, Some("spk.monitor"), p, Some("DP-1"), None);
         assert_eq!(
             c,
-            vec!["wf-recorder", "-o", "DP-1", "-a", "-f", "/tmp/rec.mp4"]
+            vec![
+                "wf-recorder",
+                "-o",
+                "DP-1",
+                "-aspk.monitor",
+                "-f",
+                "/tmp/rec.mp4"
+            ]
         );
-        // Fullscreen with FPS: `-o NAME -r N [-a] -f path` (no `-g`).
-        let d = build_wf_recorder_argv(None, true, p, Some("HDMI-A-1"), Some(144));
+        // Fullscreen with FPS: `-o NAME -r N [-aDEVICE] -f path` (no `-g`).
+        let d = build_wf_recorder_argv(None, Some("spk.monitor"), p, Some("HDMI-A-1"), Some(144));
         assert_eq!(
             d,
             vec![
@@ -3291,23 +3494,23 @@ mod tests {
                 "HDMI-A-1",
                 "-r",
                 "144",
-                "-a",
+                "-aspk.monitor",
                 "-f",
                 "/tmp/rec.mp4"
             ]
         );
         // Auto FPS: omit `-r`.
-        let e = build_wf_recorder_argv(None, false, p, Some("eDP-1"), None);
+        let e = build_wf_recorder_argv(None, None, p, Some("eDP-1"), None);
         assert_eq!(e, vec!["wf-recorder", "-o", "eDP-1", "-f", "/tmp/rec.mp4"]);
         // Region ignores fps even if Some (no `-g`+`-r`).
-        let f = build_wf_recorder_argv(Some("0,0 10x10"), false, p, None, Some(60));
+        let f = build_wf_recorder_argv(Some("0,0 10x10"), None, p, None, Some(60));
         assert_eq!(
             f,
             vec!["wf-recorder", "-g", "0,0 10x10", "-f", "/tmp/rec.mp4"]
         );
         assert!(!f.iter().any(|a| a == "-r"));
         // Zero FPS never emits `-r`.
-        let g = build_wf_recorder_argv(None, false, p, Some("eDP-1"), Some(0));
+        let g = build_wf_recorder_argv(None, None, p, Some("eDP-1"), Some(0));
         assert!(!g.iter().any(|a| a == "-r"), "argv={g:?}");
     }
 
@@ -3717,13 +3920,16 @@ mod tests {
             a0.windows(2).any(|w| w[0] == "-o" && w[1] == "HDMI-A-1"),
             "primary first: {a0:?}"
         );
-        assert!(a0.iter().any(|x| x == "-a"), "audio on primary: {a0:?}");
+        assert!(
+            a0.iter().any(|x| x.starts_with("-a")),
+            "audio on primary: {a0:?}"
+        );
         assert!(
             a1.windows(2).any(|w| w[0] == "-o" && w[1] == "DP-1"),
             "secondary: {a1:?}"
         );
         assert!(
-            !a1.iter().any(|x| x == "-a"),
+            !a1.iter().any(|x| x.starts_with("-a")),
             "no audio on secondary: {a1:?}"
         );
         let _ = rec.stop();
@@ -4157,7 +4363,7 @@ mod tests {
     #[test]
     fn build_both_wf_recorder_argv_shape() {
         let p = Path::new("/tmp/t.mkv");
-        let a = build_both_wf_recorder_argv("HDMI-A-1", true, p);
+        let a = build_both_wf_recorder_argv("HDMI-A-1", Some("spk.monitor"), p);
         assert_eq!(
             a,
             vec![
@@ -4167,13 +4373,13 @@ mod tests {
                 "-r",
                 "60",
                 "-D",
-                "-a",
+                "-aspk.monitor",
                 "-f",
                 "/tmp/t.mkv"
             ]
         );
-        let b = build_both_wf_recorder_argv("DP-1", false, p);
-        assert!(!b.iter().any(|x| x == "-a"));
+        let b = build_both_wf_recorder_argv("DP-1", None, p);
+        assert!(!b.iter().any(|x| x.starts_with("-a")));
         assert!(b.iter().any(|x| x == "-D"));
     }
 }

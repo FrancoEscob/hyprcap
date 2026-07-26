@@ -75,8 +75,14 @@ bind = SUPER SHIFT, A, exec, hyprcap toggle-region
 | Quick region | `hyprcap toggle-region` (again to stop) |
 | One monitor (CLI) | `hyprcap fullscreen --output NAME --fps 60` |
 | Both screens | GUI **2 monitors**, or `hyprcap both` |
+| System audio (PC) | GUI **All PC sound**, or `--audio` / `--system all` |
+| Mic | GUI **Microphone** (+ device), or `--mic` / `--mic-device NAME` |
+| One app only | GUI **One app**, or `--system app --audio-app Spotify` |
 | List outputs | `hyprcap list-outputs` |
+| List audio devices | `hyprcap list-audio` |
 | Quit session | `hyprcap quit` |
+
+Audio is **off by default**. Mic + system sound are mixed into **one track**. App capture re-routes that app via PipeWire/Pulse for the session (you still hear it).
 
 Closing the window **does not** stop a recording — use **Stop**.
 
@@ -92,6 +98,12 @@ Closing the window **does not** stop a recording — use **Stop**.
 # output_dir = "/home/you/Videos"
 # fullscreen_output = "DP-1"
 # one_fps = 144
+# audio_default = false          # legacy: true ≈ system all
+# system_audio = "off"           # off | all | app
+# audio_sink = ""                # empty = default sink
+# audio_app = "Spotify"
+# mic_default = false
+# mic_device = ""                # empty = default input
 ```
 
 > If you used the pre-rename `record-ui` builds: old config lived in `~/.config/record-ui/`. Copy settings over if needed.

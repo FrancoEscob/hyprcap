@@ -3,6 +3,7 @@
 //! The binary (`main.rs`) wires CLI and the optional GUI view. GTK/adw live only
 //! in the binary `ui` module and are never initialized from library code.
 
+pub mod audio;
 pub mod client;
 pub mod config;
 pub mod ipc;
