@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <strong>Lightweight pure-Rust screen recorder for Hyprland</strong><br/>
-  GTK4 / libadwaita UI around <a href="https://github.com/ammen99/wf-recorder">wf-recorder</a>
+  <strong>Lightweight Rust + GTK4 screen recorder for Hyprland</strong><br/>
+  libadwaita UI around <a href="https://github.com/ammen99/wf-recorder">wf-recorder</a>
 </p>
 
 | Mode | What it does |
@@ -36,26 +36,22 @@ CLI for keybinds. Files land in Videos; path is copied to the clipboard.
 
 ## Install (Arch)
 
-```bash
-# Preferred once published:
-yay -S hyprcap-git
-# or:  paru -S hyprcap-git
+**AUR package name:** [`record-ui-git`](https://aur.archlinux.org/packages/record-ui-git)  
+**Binary / brand:** `hyprcap` (this repo)
 
-# Temporary (old AUR name still may exist during transition):
-# yay -S record-ui-git
+```bash
+yay -S record-ui-git
+# or:  paru -S record-ui-git
 ```
 
-That installs the app **and** hard deps (`wf-recorder`, `slurp`, `ffmpeg`, GTK, …), puts `hyprcap` on `PATH`, and registers the menu entry for **walker**.
+That installs hard deps (`wf-recorder`, `slurp`, `ffmpeg`, GTK, …), puts **`hyprcap`** on `PATH`, and registers the desktop entry (walker / app menu).
+
+> **Name clash:** AUR packages [`hyprcap`](https://aur.archlinux.org/packages/hyprcap) / [`hyprcap-git`](https://aur.archlinux.org/packages/hyprcap-git) are a **different** project (bash helper for grim/wf-recorder). Do **not** install those expecting this app. Ours is only **`record-ui-git`** → `/usr/bin/hyprcap`.
 
 ```bash
-yay -Sya   # if AUR index is stale
-yay -S hyprcap-git
-```
-
-Then:
-
-```bash
-hyprcap          # GUI
+yay -Sya              # if the AUR index is stale
+yay -S record-ui-git
+hyprcap               # GUI
 # or search “Hyprcap” in walker
 ```
 

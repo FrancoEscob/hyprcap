@@ -1,12 +1,13 @@
 # Maintainer: Franco Escobar <francoescobarvrx@gmail.com>
 #
-# AUR name remains record-ui-git (hyprcap-git is taken by another project).
-# Binary and UI brand: hyprcap. Install: yay -S record-ui-git
+# AUR package: record-ui-git  →  /usr/bin/hyprcap  (brand: Hyprcap)
+# Do NOT use AUR hyprcap / hyprcap-git — those are a different project.
+# Install: yay -S record-ui-git
 
 pkgname=record-ui-git
 pkgver=r0.g0000000
 pkgrel=1
-pkgdesc="Hyprcap — lightweight pure-Rust screen recorder for Hyprland (wf-recorder + GTK4)"
+pkgdesc="Hyprcap — Rust/GTK4 screen recorder for Hyprland (wf-recorder UI; binary: hyprcap)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/FrancoEscob/hyprcap"
 license=('MIT')

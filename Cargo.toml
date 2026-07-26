@@ -2,7 +2,7 @@
 name = "hyprcap"
 version = "0.1.0"
 edition = "2021"
-description = "Lightweight pure-Rust screen recorder for Hyprland (wf-recorder + GTK4)"
+description = "Lightweight Rust + GTK4 screen recorder UI for Hyprland (wf-recorder)"
 license = "MIT"
 publish = false
 repository = "https://github.com/FrancoEscob/hyprcap"

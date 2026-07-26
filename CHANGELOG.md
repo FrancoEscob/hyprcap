@@ -7,6 +7,11 @@ and this project roughly follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Docs/AUR: install path is **`record-ui-git`** only; warn that AUR `hyprcap` / `hyprcap-git` are a different project
+- Wording: “Rust + GTK4 UI around wf-recorder” (not “pure-Rust recorder”)
+
 ### Added
 
 - **Audio matrix** (system / app / mic → one mixed track):
@@ -32,14 +37,14 @@ and this project roughly follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [0.1.0] — 2026-03 (initial public release)
+## [0.1.0] — 2026-07 (initial public release)
 
 ### Added
 
 - Region / one-monitor / two-monitor capture around `wf-recorder` + `slurp`
 - GTK4 / libadwaita GUI and CLI for Hyprland
 - Dual-monitor layout-true stitch (exactly two heads)
-- AUR package `hyprcap-git`
+- AUR package [`record-ui-git`](https://aur.archlinux.org/packages/record-ui-git) (binary `hyprcap`)
 - Desktop entry and icons
 
 [Unreleased]: https://github.com/FrancoEscob/hyprcap/compare/v0.1.0...HEAD

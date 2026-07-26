@@ -1,12 +1,12 @@
 # Maintainer: Franco Escobar <francoescobarvrx@gmail.com>
 #
-# AUR: yay -S hyprcap-git
-# Installs /usr/bin/hyprcap + desktop entry + icon.
+# TEMPLATE ONLY — do not publish. AUR name hyprcap-git is taken by another project.
+# Active package: ../record-ui-git  (yay -S record-ui-git → /usr/bin/hyprcap)
 
 pkgname=hyprcap-git
 pkgver=0.1.0.r0.g0000000
 pkgrel=1
-pkgdesc="Lightweight pure-Rust screen recorder for Hyprland (wf-recorder + GTK4)"
+pkgdesc="TEMPLATE ONLY — use record-ui-git (Hyprcap). hyprcap-git is taken on AUR."
 arch=('x86_64' 'aarch64')
 url="https://github.com/FrancoEscob/hyprcap"
 license=('MIT')

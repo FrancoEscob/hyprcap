@@ -1,17 +1,18 @@
 # Arch packaging (AUR)
 
-## Name note
+## Name note (important)
 
 | AUR name | Status |
 |----------|--------|
 | **`record-ui-git`** | **Ours** (maintainer `francoescob`). Tracks [FrancoEscob/hyprcap](https://github.com/FrancoEscob/hyprcap), installs `/usr/bin/hyprcap`. |
-| `hyprcap-git` / `hyprcap` | **Taken** by another project (different repo). Do not overwrite. |
+| `hyprcap-git` / `hyprcap` | **Taken** by [another project](https://github.com/alonso-herreros/hyprcap). Never overwrite. Never tell users to install those for this app. |
 
 ## Users
 
 ```bash
 yay -S record-ui-git
 # or: paru -S record-ui-git
+hyprcap   # binary name
 ```
 
 Installs `/usr/bin/hyprcap` (+ transitional `record-ui` symlink), desktop entry, and icons.
